@@ -39,7 +39,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 String songShowing = "";
 
 unsigned long lastPhotoChange = -60000;
-const unsigned long photoChangeInterval = 5000; // Intervalo de 30 segundos
+const unsigned long photoChangeInterval = 30000; // Intervalo de 30 segundos
 
 // Función para mostrar el icono de WiFi parpadeando
 void showWiFiIcon(int n)
@@ -232,23 +232,20 @@ String fetchSongId()
 
 void fadeOut()
 {
-  ;
-  /*for (int b = brightness; b >= 0; b--)
+  for (int b = brightness; b >= 0; b--)
   {
     dma_display->setBrightness8(b);
-    delay(100);
-  }*/
+    delay(30);
+  }
 }
 
 void fadeIn()
 {
-  ;
-  /*
     for (int b = 0; b <= brightness; b++)
     {
       dma_display->setBrightness8(b);
-      delay(100);
-    }*/
+      delay(30);
+    }
 }
 
 void showPhoto(int photoIndex)
