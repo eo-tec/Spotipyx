@@ -39,7 +39,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 String songShowing = "";
 
 unsigned long lastPhotoChange = -60000;
-const unsigned long photoChangeInterval = 30000; // Intervalo de 30 segundos
+const unsigned long photoChangeInterval = 30000;
 
 // Función para mostrar el icono de WiFi parpadeando
 void showWiFiIcon(int n)
@@ -124,7 +124,7 @@ void pushUpAnimation(int y, JsonArray &data)
 
 void fetchAndDrawCover()
 {
-  lastPhotoChange = millis() - photoChangeInterval; // Reiniciar el temporizador de cambio de foto
+  lastPhotoChange = millis(); // Reiniciar el temporizador de cambio de foto
   WiFiClientSecure client;                          // Cliente seguro para HTTPS
   HTTPClient http;
 
@@ -252,6 +252,7 @@ void showPhoto(int photoIndex)
 {
   WiFiClientSecure client; // Usar WiFiClientSecure para HTTPS
   HTTPClient http;
+  songShowing = "photo";
 
   client.setInsecure(); // No valida el certificado (Úsalo solo si no tienes un certificado válido)
 
