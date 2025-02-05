@@ -8,7 +8,9 @@
 #include <Fonts/FreeSans12pt7b.h>
 #include <Fonts/Picopixel.h>
 #include <ArduinoOTA.h>
-#include <pics.h>
+#include <pics.h>        // Aquí se asume que en pics.h están definidas las imágenes (incluido "qr")
+#include <Preferences.h> // Para guardar las credenciales en memoria
+#include <WebServer.h>   // Para el servidor web en modo AP
 
 // Pines del panel
 #define E_PIN 18
@@ -25,8 +27,6 @@ uint16_t myRED = 0xF800;
 uint16_t myGREEN = 0x07E0;
 uint16_t myBLUE = 0x001F;
 
-const char *ssid = "WifiAlvaro";
-const char *password = "EoTec96!";
 const char *serverUrl = "https://my-album-production.up.railway.app/";
 
 int brightness = 30;
@@ -37,11 +37,15 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
 String songShowing = "";
-
 unsigned long lastPhotoChange = -60000;
 const unsigned long photoChangeInterval = 30000;
 
-// Función para mostrar el icono de WiFi parpadeando
+// Declaraciones globales para las credenciales y el servidor
+Preferences preferences;
+WebServer server(80);
+bool apMode = false; // Se activará si no hay credenciales guardadas
+
+// Función para mostrar el icono de WiFi parpadeando (ya existente)
 void showWiFiIcon(int n)
 {
   uint16_t draw[32][32];
@@ -49,19 +53,19 @@ void showWiFiIcon(int n)
   {
     memcpy(draw, wifiArray, sizeof(draw));
   }
-  else if(n == 1)
+  else if (n == 1)
   {
     memcpy(draw, wifi1, sizeof(draw));
-  }else if(n == 2)
+  }
+  else if (n == 2)
   {
     memcpy(draw, wifi2, sizeof(draw));
-  }else if(n == 3)
+  }
+  else if (n == 3)
   {
     memcpy(draw, wifi3, sizeof(draw));
   }
-
   dma_display->clearScreen();
-  
   for (int y = 0; y < 32; y++)
   {
     for (int x = 0; x < 32; x++)
@@ -71,6 +75,7 @@ void showWiFiIcon(int n)
   }
 }
 
+// Función para mostrar el porcentaje durante la actualización OTA (ya existente)
 void showPercetage(int percentage)
 {
   dma_display->clearScreen();
@@ -84,7 +89,7 @@ void showPercetage(int percentage)
   dma_display->print("Updating");
 }
 
-// Función para mostrar la hora en el panel
+// Función para mostrar la hora en el panel (ya existente)
 void showTime()
 {
   dma_display->clearScreen();
@@ -100,12 +105,14 @@ void showTime()
   Serial.println(currentTime);
 }
 
+// Buffer para la pantalla (ya existente)
 uint16_t screenBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer to store the current screen content
 
+// Función para animación "push up" (ya existente)
 void pushUpAnimation(int y, JsonArray &data)
 {
   unsigned long startTime = millis();
-  for (int i = 0; i <= y; i++) // Change the loop condition to include the last row
+  for (int i = 0; i <= y; i++) // Incluye la última fila
   {
     JsonArray row = data[PANEL_RES_Y - y + i - 1];
     for (int j = 0; j < PANEL_RES_X; j++)
@@ -122,88 +129,66 @@ void pushUpAnimation(int y, JsonArray &data)
   }
 }
 
+// Función para descargar y mostrar la portada (ya existente)
 void fetchAndDrawCover()
 {
-  lastPhotoChange = millis(); // Reiniciar el temporizador de cambio de foto
-  WiFiClientSecure client;                          // Cliente seguro para HTTPS
+  lastPhotoChange = millis();
+  WiFiClientSecure client;
   HTTPClient http;
-
-  // Configuración opcional del certificado (puedes agregar el tuyo si lo tienes)
-  // client.setCACert(rootCACertificate);
-
-  // Deshabilitar validación del certificado (Úsalo solo para pruebas)
   client.setInsecure();
 
   Serial.println("Conectando al servidor...");
-  http.begin(client, String(serverUrl) + "cover-64x64"); // Asociar cliente seguro con la URL del servidor
-  int httpCode = http.GET();                             // Realizar la solicitud GET
+  http.begin(client, String(serverUrl) + "cover-64x64");
+  int httpCode = http.GET();
 
-  if (httpCode == 200) // Si la respuesta HTTP es OK
+  if (httpCode == 200)
   {
     String payload = http.getString();
     StaticJsonDocument<100000> doc;
     DeserializationError error = deserializeJson(doc, payload);
-
     if (error)
     {
       Serial.print("Error al parsear JSON: ");
       Serial.println(error.c_str());
-      showTime(); // Mostrar la hora si no se puede parsear el JSON
+      showTime();
       http.end();
       return;
     }
-
     JsonArray data = doc["data"].as<JsonArray>();
     int width = doc["width"];
     int height = doc["height"];
 
-    // Push up animation before showing new cover
-
-    // dma_display->clearScreen();
+    // Animación "push up" antes de mostrar la nueva portada
     for (int y = 0; y < height; y++)
     {
-      JsonArray row = data[y].as<JsonArray>();
       pushUpAnimation(y, data);
-      /*for (int x = 0; x < width; x++)
-      {
-        uint16_t color = row[x];
-        dma_display->drawPixel(x, y, color);
-      }*/
     }
   }
   else
   {
     Serial.printf("Error en la solicitud: %d\n", httpCode);
-    showTime(); // Mostrar la hora si el servidor devuelve un error
+    showTime();
   }
-
-  http.end(); // Finalizar la conexión HTTP
+  http.end();
 }
 
+// Función para obtener el ID de la canción en reproducción (ya existente)
 String fetchSongId()
 {
-  WiFiClientSecure client; // Usar WiFiClientSecure para HTTPS
+  WiFiClientSecure client;
   HTTPClient http;
-
-  // Si tienes un certificado raíz del servidor, puedes configurarlo aquí
-  // client.setCACert(rootCACertificate);
-
-  // Para deshabilitar la validación del certificado (solo para pruebas), usa:
-  client.setInsecure(); // No valida el certificado (Úsalo solo si no tienes un certificado válido)
-
-  http.begin(client, String(serverUrl) + "id-playing"); // Asociar el cliente seguro (HTTPS) con la URL
-
-  int httpCode = http.GET(); // Realizar la solicitud GET
+  client.setInsecure();
+  http.begin(client, String(serverUrl) + "id-playing");
+  int httpCode = http.GET();
 
   if (httpCode == 200)
-  {                                    // Si la respuesta HTTP es OK
-    String payload = http.getString(); // Obtener el cuerpo de la respuesta
+  {
+    String payload = http.getString();
     StaticJsonDocument<1024> doc;
     DeserializationError error = deserializeJson(doc, payload);
-
     if (!error)
     {
-      String songId = doc["id"].as<String>(); // Obtener el ID como string
+      String songId = doc["id"].as<String>();
       http.end();
       if (songId == "" || songId == "null")
       {
@@ -225,11 +210,11 @@ String fetchSongId()
   {
     Serial.printf("Error en la solicitud: %d\n", httpCode);
   }
-
-  http.end(); // Finalizar la conexión HTTP
-  return "";  // Devuelve un string vacío si hay error
+  http.end();
+  return "";
 }
 
+// Funciones de fade in/out (ya existentes)
 void fadeOut()
 {
   for (int b = brightness; b >= 0; b--)
@@ -241,43 +226,40 @@ void fadeOut()
 
 void fadeIn()
 {
-    for (int b = 0; b <= brightness; b++)
-    {
-      dma_display->setBrightness8(b);
-      delay(30);
-    }
+  for (int b = 0; b <= brightness; b++)
+  {
+    dma_display->setBrightness8(b);
+    delay(30);
+  }
 }
 
+// Función para mostrar una foto (ya existente)
 void showPhoto(int photoIndex)
 {
-  WiFiClientSecure client; // Usar WiFiClientSecure para HTTPS
+  WiFiClientSecure client;
   HTTPClient http;
   songShowing = "photo";
-
-  client.setInsecure(); // No valida el certificado (Úsalo solo si no tienes un certificado válido)
+  client.setInsecure();
 
   Serial.println("Conectando al servidor para obtener la foto...");
-  http.begin(client, String(serverUrl) + "get-photo/?id=" + String(photoIndex)); // Asociar cliente con la URL del servidor
-  int httpCode = http.GET();                                                     // Realizar la solicitud GET
+  http.begin(client, String(serverUrl) + "get-photo/?id=" + String(photoIndex));
+  int httpCode = http.GET();
 
-  if (httpCode == 200) // Si la respuesta HTTP es OK
+  if (httpCode == 200)
   {
-    fadeOut(); // Fade out before showing new photo
-
+    fadeOut();
     String payload = http.getString();
     DynamicJsonDocument doc(100000);
     DeserializationError error = deserializeJson(doc, payload);
-
     if (error)
     {
       Serial.print("Error al parsear JSON: ");
       Serial.println(error.c_str());
-      showTime(); // Mostrar la hora si no se puede parsear el JSON
+      showTime();
       http.end();
-      fadeIn(); // Fade in back to original brightness
+      fadeIn();
       return;
     }
-
     JsonObject photo = doc["photo"].as<JsonObject>();
     JsonArray data = photo["data"].as<JsonArray>();
     int width = photo["width"];
@@ -296,104 +278,144 @@ void showPhoto(int photoIndex)
       }
     }
 
-    // Display title at the bottom left
+    // Mostrar título en la parte inferior izquierda
     dma_display->setFont(&Picopixel);
     dma_display->setTextSize(1);
     dma_display->setTextColor(myWHITE);
     int16_t x1, y1;
     uint16_t w, h;
     dma_display->getTextBounds(title, 0, PANEL_RES_Y - 2, &x1, &y1, &w, &h);
-    dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK); // Draw black rectangle
+    dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK);
     dma_display->setCursor(1, PANEL_RES_Y - 2);
     dma_display->print(title);
 
-    Serial.print("Width: ");
-    Serial.println(w);
-    Serial.print("Name length: ");
-    Serial.println(name.length());
-    Serial.print("Sum: ");
-    Serial.println(w + name.length());
-
-    // Display name at the bottom right
+    // Mostrar nombre en la parte inferior derecha (o en otra posición según ancho)
     if (w + name.length() * 3 > PANEL_RES_X && title.length() > 0)
     {
       dma_display->getTextBounds(name, 0, PANEL_RES_Y - 10, &x1, &y1, &w, &h);
-      dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK); // Draw black rectangle
+      dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK);
       dma_display->setCursor(1, PANEL_RES_Y - 10);
       dma_display->print(name);
     }
     else
     {
       dma_display->getTextBounds(name, 0, PANEL_RES_Y - 2, &x1, &y1, &w, &h);
-      dma_display->fillRect(PANEL_RES_X - w - 1, y1 - 1, w + 2, h + 2, myBLACK); // Draw black rectangle
+      dma_display->fillRect(PANEL_RES_X - w - 1, y1 - 1, w + 2, h + 2, myBLACK);
       dma_display->setCursor(PANEL_RES_X - w, PANEL_RES_Y - 2);
       dma_display->print(name);
     }
-
-    fadeIn(); // Fade in after showing new photo
+    fadeIn();
   }
   else
   {
     Serial.printf("Error en la solicitud: %d\n", httpCode);
-    showTime(); // Mostrar la hora si el servidor devuelve un error
-    fadeIn();   // Fade in back to original brightness
+    showTime();
+    fadeIn();
   }
-
-  http.end(); // Finalizar la conexión HTTP
+  http.end();
 }
 
 void setup()
 {
   Serial.begin(115200);
 
+  // Configuración del panel
   HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
   mxconfig.gpio.e = E_PIN;
   mxconfig.clkphase = false;
-
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   dma_display->begin();
   dma_display->setBrightness8(brightness);
   dma_display->clearScreen();
   dma_display->setRotation(45);
 
-  WiFi.begin(ssid, password);
+  // Inicializar Preferences para leer/guardar las credenciales
+  preferences.begin("wifi", false);
+  String storedSSID = preferences.getString("ssid", "");
+  String storedPassword = preferences.getString("password", "");
 
-  Serial.println("Conectando al WiFi...");
-  bool wifiIconOn = true;
-  int wifiIconCounter = 0;
-
-  while (WiFi.status() != WL_CONNECTED)
+  // Si no hay credenciales guardadas se activa el modo AP
+  if (storedSSID == "")
   {
-    showWiFiIcon(wifiIconCounter++);
-    wifiIconOn = !wifiIconOn;
-    if (wifiIconCounter > 3)
-    {
-      wifiIconCounter = 0;
-    }
-    delay(500);
-  }
-  Serial.println("\nWiFi conectado!");
+    apMode = true;
+    Serial.println("No se encontraron credenciales WiFi. Iniciando modo AP...");
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("Pixie", "12345678");
 
-  // Configuración de OTA
-  ArduinoOTA.setHostname("Pixie"); // Establece el hostname
+    // Definir las rutas del servidor web
+    server.on("/", HTTP_GET, []()
+              {
+      String html = "<html><head><title>Configurar WiFi</title></head><body>";
+      html += "<h1>Configurar WiFi</h1>";
+      html += "<form action='/save' method='POST'>";
+      html += "SSID: <input type='text' name='ssid'><br>";
+      html += "Password: <input type='password' name='password'><br>";
+      html += "<input type='submit' value='Guardar'>";
+      html += "</form></body></html>";
+      server.send(200, "text/html", html); });
+
+    server.on("/save", HTTP_POST, []()
+              {
+      if (server.hasArg("ssid") && server.hasArg("password"))
+      {
+        String newSSID = server.arg("ssid");
+        String newPassword = server.arg("password");
+        // Guardar las credenciales en Preferences
+        preferences.putString("ssid", newSSID);
+        preferences.putString("password", newPassword);
+        String response = "Credenciales guardadas. Reiniciando...";
+        server.send(200, "text/html", response);
+        delay(1000);
+        ESP.restart();
+      }
+      else
+      {
+        server.send(400, "text/html", "Faltan datos");
+      } });
+    server.begin();
+
+    // Mostrar en el panel la imagen QR (se asume que "qr" es una matriz 64x64 definida en pics.h)
+    for (int y = 0; y < 64; y++)
+    {
+      for (int x = 0; x < 64; x++)
+      {
+        dma_display->drawPixel(x, y, qr[y][x]);
+      }
+    }
+  }
+  else
+  {
+    // Si se encontraron credenciales, conectar en modo STA
+    Serial.println("Conectando a WiFi usando credenciales almacenadas...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
+    int wifiIconCounter = 0;
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      showWiFiIcon(wifiIconCounter++);
+      if (wifiIconCounter > 3)
+        wifiIconCounter = 0;
+      delay(500);
+    }
+    Serial.println("\nWiFi conectado!");
+  }
+
+  // Configuración de OTA (se activa tanto en modo AP como STA)
+  ArduinoOTA.setHostname("Pixie");
   ArduinoOTA.onStart([]()
                      {
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH)
       type = "sketch";
-    else // U_SPIFFS
+    else
       type = "filesystem";
-
-    // Notificación por puerto serie
     Serial.println("Inicio de actualización OTA: " + type); });
-
   ArduinoOTA.onEnd([]()
                    { Serial.println("\nActualización OTA completada."); });
-
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                        { Serial.printf("Progreso: %u%%\n", (progress / (total / 100))); 
-                          showPercetage((progress / (total / 100))); });
-
+                        {
+    Serial.printf("Progreso: %u%%\n", (progress / (total / 100)));
+    showPercetage((progress / (total / 100))); });
   ArduinoOTA.onError([](ota_error_t error)
                      {
     Serial.printf("Error [%u]: ", error);
@@ -407,46 +429,55 @@ void setup()
       Serial.println("Error al recibir");
     else if (error == OTA_END_ERROR)
       Serial.println("Error al finalizar"); });
-
   ArduinoOTA.begin();
 
   timeClient.begin();
-  timeClient.setTimeOffset(3600); // Ajusta según tu zona horaria
-  showTime();
+  timeClient.setTimeOffset(3600);
+  // showTime();
   lastPhotoChange = millis();
 }
 
 String songOnline = "";
 int photoIndex = 0;
+
 void loop()
 {
-  songOnline = fetchSongId();
-
-  if (songOnline == "" || songOnline == "null")
+  // Si estamos en modo AP, solo atender el servidor web y OTA
+  if (apMode)
   {
-    // showTime();
-    if (millis() - lastPhotoChange >= photoChangeInterval)
-    {
-      showPhoto(photoIndex++);
-      lastPhotoChange = millis();
-      if (photoIndex >= maxIndex)
-      {
-        photoIndex = 0;
-      }
-    }
+    server.handleClient();
+    ArduinoOTA.handle();
+    delay(10);
+    return;
   }
   else
   {
-    if (songShowing != songOnline)
+    // Si estamos conectados a WiFi (modo STA), se ejecuta la lógica original:
+    songOnline = fetchSongId();
+    if (songOnline == "" || songOnline == "null")
     {
-      songShowing = songOnline;
-      fetchAndDrawCover();
+      if (millis() - lastPhotoChange >= photoChangeInterval)
+      {
+        showPhoto(photoIndex++);
+        lastPhotoChange = millis();
+        if (photoIndex >= maxIndex)
+        {
+          photoIndex = 0;
+        }
+      }
     }
-  }
-
-  delay(1000);
-  for (int i = 0; i < 10; i++)
-  {
-    ArduinoOTA.handle();
+    else
+    {
+      if (songShowing != songOnline)
+      {
+        songShowing = songOnline;
+        fetchAndDrawCover();
+      }
+    }
+    delay(1000);
+    for (int i = 0; i < 10; i++)
+    {
+      ArduinoOTA.handle();
+    }
   }
 }
