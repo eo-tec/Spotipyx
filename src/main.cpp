@@ -28,10 +28,14 @@ uint16_t myGREEN = 0x07E0;
 uint16_t myBLUE = 0x001F;
 
 const char *serverUrl = "https://my-album-production.up.railway.app/";
+const char *serverUrlPhoto = "https://my-album-production.up.railway.app/photo/";
+const char *serverUrlSpotify = "https://my-album-production.up.railway.app/spotify/";
 
-int brightness = 30;
+int brightness = 10;
 int wifiBrightness = 0;
 int maxIndex = 5;
+int maxPhotos = 5;
+int currentVersion = 0;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -44,6 +48,7 @@ const unsigned long photoChangeInterval = 30000;
 Preferences preferences;
 WebServer server(80);
 bool apMode = false; // Se activará si no hay credenciales guardadas
+bool allowSpotify = false;
 
 // Función para mostrar el icono de WiFi parpadeando (ya existente)
 void showWiFiIcon(int n)
@@ -138,7 +143,7 @@ void fetchAndDrawCover()
   client.setInsecure();
 
   Serial.println("Conectando al servidor...");
-  http.begin(client, String(serverUrl) + "cover-64x64");
+  http.begin(client, String(serverUrl) + "spotify/" + "cover-64x64");
   int httpCode = http.GET();
 
   if (httpCode == 200)
@@ -178,7 +183,7 @@ String fetchSongId()
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
-  http.begin(client, String(serverUrl) + "id-playing");
+  http.begin(client, String(serverUrl) + "spotify/" + "id-playing");
   int httpCode = http.GET();
 
   if (httpCode == 200)
@@ -242,7 +247,7 @@ void showPhoto(int photoIndex)
   client.setInsecure();
 
   Serial.println("Conectando al servidor para obtener la foto...");
-  http.begin(client, String(serverUrl) + "get-photo/?id=" + String(photoIndex));
+  http.begin(client, String(serverUrl) + "photo/" + "get-photo/?id=" + String(photoIndex));
   int httpCode = http.GET();
 
   if (httpCode == 200)
@@ -315,6 +320,108 @@ void showPhoto(int photoIndex)
   http.end();
 }
 
+void showUpdateMessage()
+{
+  dma_display->setFont();
+  dma_display->setCursor(8, 50); // Centrar en el panel
+  dma_display->print("Updating");
+}
+
+void showCheckMessage()
+{
+  dma_display->setFont();
+  dma_display->setCursor(8, 50); // Centrar en el panel
+  dma_display->print("Checking");
+}
+
+void checkForUpdates()
+{
+  WiFiClientSecure client;
+  HTTPClient http;
+  client.setInsecure();
+  showCheckMessage();
+  Serial.println("Checking for updates...");
+  http.begin(client, String(serverUrl) + "version/latest");
+  int httpCode = http.GET();
+
+  if (httpCode == 200)
+  {
+    String payload = http.getString();
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error)
+    {
+      int latestVersion = doc["version"];
+      String updateUrl = doc["url"].as<String>();
+
+      if (latestVersion > currentVersion)
+      {
+        Serial.printf("New version available: %d\n", latestVersion);
+        showUpdateMessage();
+        Serial.println("Downloading update...");
+        http.begin(client, updateUrl);
+        int updateHttpCode = http.GET();
+
+        if (updateHttpCode == 200)
+        {
+          WiFiClient *updateClient = http.getStreamPtr();
+          size_t contentLength = http.getSize();
+          Update.onProgress([](size_t written, size_t total)
+                            {
+            int percent = (written * 100) / total;
+            showPercetage(percent);
+            Serial.printf("Progreso: %d%% (%d/%d bytes)\n", percent, written, total); });
+
+          if (Update.begin(contentLength))
+          {
+            size_t written = Update.writeStream(*updateClient);
+            if (written == contentLength)
+            {
+              Serial.println("Update successfully written.");
+              if (Update.end())
+              {
+                Serial.println("Update successfully completed.");
+                preferences.putInt("currentVersion", latestVersion);
+                ESP.restart();
+              }
+              else
+              {
+                Serial.printf("Update failed. Error: %s\n", Update.errorString());
+              }
+            }
+            else
+            {
+              Serial.printf("Update failed. Written only: %d/%d\n", written, contentLength);
+            }
+          }
+          else
+          {
+            Serial.println("Not enough space for update.");
+          }
+        }
+        else
+        {
+          Serial.printf("Failed to download update. HTTP code: %d\n", updateHttpCode);
+        }
+      }
+      else
+      {
+        Serial.println("No new updates available.");
+      }
+    }
+    else
+    {
+      Serial.print("Error parsing JSON: ");
+      Serial.println(error.c_str());
+    }
+  }
+  else
+  {
+    Serial.printf("Failed to check for updates. HTTP code: %d\n", httpCode);
+  }
+  http.end();
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -333,6 +440,9 @@ void setup()
   preferences.begin("wifi", false);
   String storedSSID = preferences.getString("ssid", "");
   String storedPassword = preferences.getString("password", "");
+  allowSpotify = preferences.getBool("allowSpotify", false);
+  maxPhotos = preferences.getInt("maxPhotos", 5);
+  currentVersion = preferences.getInt("currentVersion", 0);
 
   // Si no hay credenciales guardadas se activa el modo AP
   if (storedSSID == "")
@@ -360,6 +470,8 @@ void setup()
       {
         String newSSID = server.arg("ssid");
         String newPassword = server.arg("password");
+        bool newAllowSpotify = server.hasArg("allowSpotify");
+        int newMaxPhotos = server.arg("maxPhotos").toInt();
         // Guardar las credenciales en Preferences
         preferences.putString("ssid", newSSID);
         preferences.putString("password", newPassword);
@@ -433,8 +545,9 @@ void setup()
 
   timeClient.begin();
   timeClient.setTimeOffset(3600);
-  // showTime();
-  lastPhotoChange = millis();
+
+  // Check for updates
+  checkForUpdates();
 }
 
 String songOnline = "";
@@ -453,25 +566,40 @@ void loop()
   else
   {
     // Si estamos conectados a WiFi (modo STA), se ejecuta la lógica original:
-    songOnline = fetchSongId();
-    if (songOnline == "" || songOnline == "null")
+    if (allowSpotify)
     {
-      if (millis() - lastPhotoChange >= photoChangeInterval)
+      songOnline = fetchSongId();
+      if (songOnline == "" || songOnline == "null")
       {
-        showPhoto(photoIndex++);
-        lastPhotoChange = millis();
-        if (photoIndex >= maxIndex)
+        if (millis() - lastPhotoChange >= photoChangeInterval)
         {
-          photoIndex = 0;
+          showPhoto(photoIndex++);
+          lastPhotoChange = millis();
+          if (photoIndex >= maxPhotos)
+          {
+            photoIndex = 0;
+          }
+        }
+      }
+      else
+      {
+        if (songShowing != songOnline)
+        {
+          songShowing = songOnline;
+          fetchAndDrawCover();
         }
       }
     }
     else
     {
-      if (songShowing != songOnline)
+      if (millis() - lastPhotoChange >= photoChangeInterval)
       {
-        songShowing = songOnline;
-        fetchAndDrawCover();
+        showPhoto(photoIndex++);
+        lastPhotoChange = millis();
+        if (photoIndex >= maxPhotos)
+        {
+          photoIndex = 0;
+        }
       }
     }
     delay(1000);
