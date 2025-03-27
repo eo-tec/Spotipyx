@@ -34,7 +34,7 @@ int maxPhotos = 5;
 int currentVersion = 0;
 int pixieId = 0;
 
-const bool DEV = true;
+const bool DEV = false;
 const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://my-album-production.up.railway.app/";
 
 WiFiUDP ntpUDP;
@@ -42,27 +42,24 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
 String songShowing = "";
 unsigned long lastPhotoChange = -60000;
-const unsigned long photoChangeInterval = 5000;
+unsigned long secsPhotos = 30000; // 30 segundos por defecto
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
 WebServer server(80);
 bool apMode = false; // Se activará si no hay credenciales guardadas
-bool allowSpotify = false;
+bool allowSpotify = true;
 
 WiFiClient *getWiFiClient()
 {
     if (DEV)
     {
-        // En modo desarrollo, devolvemos un WiFiClient normal
-        // (sin cifrado TLS)
         return new WiFiClient();
     }
     else
     {
-        // En modo producción, devolvemos un WiFiClientSecure
-        // y le decimos que acepte un certificado "inseguro" (self-signed)
         WiFiClientSecure *clientSecure = new WiFiClientSecure();
+        clientSecure->setInsecure();
         return clientSecure;
     }
 }
@@ -159,13 +156,13 @@ void fetchAndDrawCover()
     HTTPClient http;
 
     Serial.println("Conectando al servidor...");
-    http.begin(*client, String(serverUrl) + "spotify/" + "cover-64x64");
+    http.begin(*client, String(serverUrl) + "public/spotify/" + "cover-64x64?pixie_id=" + String(pixieId));
     int httpCode = http.GET();
 
     if (httpCode == 200)
     {
         String payload = http.getString();
-        StaticJsonDocument<100000> doc;
+        DynamicJsonDocument doc(150000); // Aumentado de 100000 a 150000
         DeserializationError error = deserializeJson(doc, payload);
         if (error)
         {
@@ -173,6 +170,7 @@ void fetchAndDrawCover()
             Serial.println(error.c_str());
             showTime();
             http.end();
+            delete client;
             return;
         }
         JsonArray data = doc["data"].as<JsonArray>();
@@ -191,6 +189,7 @@ void fetchAndDrawCover()
         showTime();
     }
     http.end();
+    delete client;
 }
 
 // Función para obtener el ID de la canción en reproducción (ya existente)
@@ -198,18 +197,19 @@ String fetchSongId()
 {
     WiFiClient *client = getWiFiClient();
     HTTPClient http;
-    http.begin(*client, String(serverUrl) + "spotify/" + "id-playing");
+    http.begin(*client, String(serverUrl) + "public/spotify/" + "id-playing?pixie_id=" + String(pixieId));
     int httpCode = http.GET();
 
     if (httpCode == 200)
     {
         String payload = http.getString();
-        StaticJsonDocument<1024> doc;
+        DynamicJsonDocument doc(2048); // Aumentado de 1024 a 2048
         DeserializationError error = deserializeJson(doc, payload);
         if (!error)
         {
             String songId = doc["id"].as<String>();
             http.end();
+            delete client;
             if (songId == "" || songId == "null")
             {
                 Serial.println("No hay canción en reproducción.");
@@ -231,6 +231,7 @@ String fetchSongId()
         Serial.printf("Error en la solicitud: %d\n", httpCode);
     }
     http.end();
+    delete client;
     return "";
 }
 
@@ -266,14 +267,18 @@ void getPixie()
     if (httpCode == 200)
     {
         String payload = http.getString();
-        StaticJsonDocument<200> doc;
+        DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
         DeserializationError error = deserializeJson(doc, payload);
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
             dma_display->setBrightness(brightness);
+            preferences.putInt("brightness", brightness);
             maxPhotos = doc["pixie"]["pictures_on_queue"];
-            Serial.printf("Pixie details updated. Brightness: %d, Max Photos: %d\n", brightness, maxPhotos);
+            preferences.putInt("maxPhotos", maxPhotos);
+            int secsBetweenPhotos = doc["pixie"]["secs_between_photos"];
+            secsPhotos = secsBetweenPhotos * 1000; // Convertir a milisegundos
+            preferences.putUInt("secsPhotos", secsPhotos);
         }
         else
         {
@@ -286,6 +291,7 @@ void getPixie()
         Serial.printf("Failed to fetch Pixie details. HTTP code: %d\n", httpCode);
     }
     http.end();
+    delete client;
 }
 
 // Función para mostrar una foto (ya existente)
@@ -297,7 +303,6 @@ void showPhoto(int photoIndex)
     songShowing = "photo";
 
     Serial.println("Conectando al servidor para obtener la foto...");
-    // http.begin(client, String(serverUrl) + "photo/" + "get-photo/?id=" + String(photoIndex) + "&pixieId=" + String(pixieId));
     http.begin(*client, String(serverUrl) + "public/photo/" + "get-photo/?id=" + String(photoIndex));
     Serial.println(String(serverUrl) + "public/photo/" + "get-photo/?id=" + String(photoIndex));
     int httpCode = http.GET();
@@ -306,7 +311,7 @@ void showPhoto(int photoIndex)
     {
         Serial.println("Foto recibida. Mostrando en el panel...");
         String payload = http.getString();
-        DynamicJsonDocument doc(100000);
+        DynamicJsonDocument doc(150000); // Aumentado de 100000 a 150000
         DeserializationError error = deserializeJson(doc, payload);
         if (error)
         {
@@ -314,6 +319,7 @@ void showPhoto(int photoIndex)
             Serial.println(error.c_str());
             showTime();
             http.end();
+            delete client;
             fadeIn();
             return;
         }
@@ -378,6 +384,7 @@ void showPhoto(int photoIndex)
         fadeIn();
     }
     http.end();
+    delete client;
 }
 
 void showUpdateMessage()
@@ -389,9 +396,15 @@ void showUpdateMessage()
 
 void showCheckMessage()
 {
+    dma_display->clearScreen();
     dma_display->setFont();
-    dma_display->setCursor(8, 50); // Centrar en el panel
+    // poner checking en una linea y for updates en la siguiente, todo centrado
+    dma_display->setCursor(8, 20); // Centrar en el panel
     dma_display->print("Checking");
+    dma_display->setCursor(8, 30); // Centrar en el panel
+    dma_display->print("for");
+    dma_display->setCursor(8, 40); // Centrar en el panel
+    dma_display->print("updates");
 }
 
 void checkForUpdates()
@@ -493,7 +506,7 @@ void registerPixie()
     http.begin(*client, String(serverUrl) + "public/pixie/add");
     http.addHeader("Content-Type", "application/json");
 
-    StaticJsonDocument<200> doc;
+    DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
     doc["mac"] = macAddress;
     String requestBody;
     serializeJson(doc, requestBody);
@@ -503,7 +516,7 @@ void registerPixie()
     if (httpCode == 200)
     {
         String payload = http.getString();
-        StaticJsonDocument<200> responseDoc;
+        DynamicJsonDocument responseDoc(2048); // Aumentado de 200 a 2048
         DeserializationError error = deserializeJson(responseDoc, payload);
         if (!error)
         {
@@ -522,6 +535,7 @@ void registerPixie()
         Serial.printf("Failed to register Pixie. HTTP code: %d\n", httpCode);
     }
     http.end();
+    delete client;
 }
 
 void setup()
@@ -536,16 +550,17 @@ void setup()
     dma_display->begin();
     dma_display->setBrightness8(brightness);
     dma_display->clearScreen();
-    dma_display->setRotation(45);
+    dma_display->setRotation(135);
 
     // Inicializar Preferences para leer/guardar las credenciales
     preferences.begin("wifi", false);
     String storedSSID = preferences.getString("ssid", "");
     String storedPassword = preferences.getString("password", "");
-    allowSpotify = preferences.getBool("allowSpotify", false);
+    allowSpotify = preferences.getBool("allowSpotify", true);
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
     pixieId = preferences.getInt("pixieId", 0);
+    secsPhotos = preferences.getUInt("secsPhotos", 30000); // Leer el intervalo de cambio de fotos
 
     // Si no hay credenciales guardadas se activa el modo AP
     if (storedSSID == "")
@@ -648,6 +663,7 @@ void setup()
 
     timeClient.begin();
     timeClient.setTimeOffset(3600);
+    timeClient.update();
 
     // Check for updates
     checkForUpdates();
@@ -684,7 +700,7 @@ void loop()
             songOnline = fetchSongId();
             if (songOnline == "" || songOnline == "null")
             {
-                if (millis() - lastPhotoChange >= photoChangeInterval)
+                if (millis() - lastPhotoChange >= secsPhotos)
                 {
                     showPhoto(photoIndex++);
                     lastPhotoChange = millis();
@@ -705,7 +721,7 @@ void loop()
         }
         else
         {
-            if (millis() - lastPhotoChange >= photoChangeInterval)
+            if (millis() - lastPhotoChange >= secsPhotos)
             {
                 showPhoto(photoIndex++);
                 lastPhotoChange = millis();
