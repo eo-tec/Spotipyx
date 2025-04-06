@@ -312,7 +312,7 @@ void getPixie()
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
-            dma_display->setBrightness(brightness);
+            dma_display->setBrightness(max(brightness, 10));
             preferences.putInt("brightness", brightness);
             maxPhotos = doc["pixie"]["pictures_on_queue"];
             preferences.putInt("maxPhotos", maxPhotos);
@@ -713,6 +713,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     memcpy(message, payload, length);
     message[length] = '\0';
 
+    // Imprimir el mensaje
+    Serial.println("Mensaje recibido en el topic: " + String(topic));
+    Serial.println("Mensaje: " + String(message));
+
     // Crear un documento JSON
     DynamicJsonDocument doc(1024);
     DeserializationError error = deserializeJson(doc, message);
@@ -738,7 +742,8 @@ void mqttReconnect() {
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD)) {
             Serial.println("conectado");
             // Suscribirse al tema específico del pixie
-            String topic = String("/pixie/") + String(pixieId);
+            String topic = String("pixie/") + String(pixieId);
+            Serial.println("Suscribiendo al tema: " + topic);
             mqttClient.subscribe(topic.c_str());
         } else {
             Serial.print("falló, rc=");
@@ -829,7 +834,7 @@ void setup()
     mxconfig.clkphase = false;
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
-    dma_display->setBrightness8(brightness);
+    dma_display->setBrightness8(max(brightness, 10));
     dma_display->clearScreen();
     dma_display->setRotation(135);
     
