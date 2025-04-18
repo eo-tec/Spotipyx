@@ -14,11 +14,11 @@
 #include <PubSubClient.h>
 
 // Configuración MQTT
-const char* MQTT_BROKER_URL = "c9df3292c56a47f08840ec694f893966.s1.eu.hivemq.cloud";
+const char *MQTT_BROKER_URL = "c9df3292c56a47f08840ec694f893966.s1.eu.hivemq.cloud";
 const int MQTT_BROKER_PORT = 8883;
-const char* MQTT_BROKER_USERNAME = "server";
-const char* MQTT_BROKER_PASSWORD = "Test1234!";
-const char* MQTT_CLIENT_ID = "pixie-"; // Se completará con el ID del pixie
+const char *MQTT_BROKER_USERNAME = "server";
+const char *MQTT_BROKER_PASSWORD = "Test1234!";
+const char *MQTT_CLIENT_ID = "pixie-"; // Se completará con el ID del pixie
 
 WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
@@ -54,7 +54,7 @@ int pixieId = 0;
 int photoIndex = 0;
 
 const bool DEV = true;
-const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://my-album-production.up.railway.app/";
+const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -84,21 +84,23 @@ WiFiClient *getWiFiClient()
 }
 
 String loadingMsg = "";
-void showLoadingMsg(String msg) {
+void showLoadingMsg(String msg)
+{
     dma_display->setTextSize(1);
-    if (loadingMsg != msg) {
+    if (loadingMsg != msg)
+    {
         loadingMsg = msg;
         dma_display->fillRect(0, 48, PANEL_RES_X, 16, myWHITE);
     }
     dma_display->setTextColor(myBLACK);
     dma_display->setFont(&Picopixel);
-    
+
     // Calcular la posición para centrar el texto
     int16_t x1, y1;
     uint16_t w, h;
     dma_display->getTextBounds(msg, 0, 50, &x1, &y1, &w, &h);
     int16_t x = (PANEL_RES_X - w) / 2;
-    
+
     // Dibujar el texto centrado
     dma_display->setCursor(x, 55);
     dma_display->print(msg);
@@ -201,9 +203,9 @@ void fetchAndDrawCover()
 
     if (httpCode == 200)
     {
-        String payload = http.getString();
-        DynamicJsonDocument doc(200000); // Aumentado de 100000 a 150000
-        DeserializationError error = deserializeJson(doc, payload);
+        DynamicJsonDocument doc(150000); // Ajusta esto si tienes PSRAM
+        delay(250);                      // Puede ayudar
+        DeserializationError error = deserializeJson(doc, http.getStream());
         if (error)
         {
             Serial.print("Error al parsear JSON: ");
@@ -242,9 +244,9 @@ String fetchSongId()
 
     if (httpCode == 200)
     {
-        String payload = http.getString();
-        DynamicJsonDocument doc(2048); // Aumentado de 1024 a 2048
-        DeserializationError error = deserializeJson(doc, payload);
+        DynamicJsonDocument doc(2048); // Ajusta esto si tienes PSRAM
+        delay(250);                    // Puede ayudar
+        DeserializationError error = deserializeJson(doc, http.getStream());
         if (!error)
         {
             String songId = doc["id"].as<String>();
@@ -306,9 +308,9 @@ void getPixie()
 
     if (httpCode == 200)
     {
-        String payload = http.getString();
         DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
-        DeserializationError error = deserializeJson(doc, payload);
+        delay(250);                    // Puede ayudar
+        DeserializationError error = deserializeJson(doc, http.getStream());
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
@@ -370,13 +372,160 @@ void showPhotoInfo(String title, String name)
     }
 }
 
-// Función para mostrar una foto con animación de expansión desde el centro
-void showPhotoFromCenter(JsonArray &data, int width, int height, String title, String name)
+void showPhoto(String url)
 {
-    int centerX = width / 2;
-    int centerY = height / 2;
+    WiFiClient *client = getWiFiClient();
+    HTTPClient http;
 
-    // Empezamos desde el centro y expandimos hacia afuera
+    Serial.println("Conectando a: " + url);
+    http.begin(*client, url);
+
+    int httpCode = http.GET();
+    if (httpCode != 200)
+    {
+        Serial.printf("Error HTTP: %d\n", httpCode);
+        http.end();
+        delete client;
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+
+    // Leer cabecera
+    uint16_t titleLen = (stream->read() << 8) | stream->read();
+    uint16_t usernameLen = (stream->read() << 8) | stream->read();
+
+    char title[titleLen + 1];
+    char username[usernameLen + 1];
+
+    for (int i = 0; i < titleLen; i++)
+        title[i] = stream->read();
+    for (int i = 0; i < usernameLen; i++)
+        username[i] = stream->read();
+    title[titleLen] = '\0';
+    username[usernameLen] = '\0';
+
+    fadeOut();
+    dma_display->clearScreen();
+
+    const int bytesPerLine = 64 * 3;
+    uint8_t lineBuffer[bytesPerLine];
+
+    for (int y = 0; y < 64; y++)
+    {
+        size_t received = stream->readBytes(lineBuffer, bytesPerLine);
+
+        if (received != bytesPerLine)
+        {
+            Serial.printf("Error: esperados %d bytes pero recibidos %d\n", bytesPerLine, received);
+            break;
+        }
+
+        for (int x = 0; x < 64; x++)
+        {
+            uint8_t g = lineBuffer[x * 3];
+            uint8_t b = lineBuffer[x * 3 + 1];
+            uint8_t r = lineBuffer[x * 3 + 2];
+
+            uint16_t color = dma_display->color565(r, g, b);
+            dma_display->drawPixel(x, y, color);
+        }
+    }
+
+    fadeIn();
+    showPhotoInfo(String(title), String(username));
+
+    http.end();
+    delete client;
+}
+
+void showPhotoFromCenter(const String &url)
+{
+    WiFiClient *client = getWiFiClient();
+    HTTPClient http;
+
+    Serial.println("Conectando a: " + url);
+    http.begin(*client, url);
+
+    int httpCode = http.GET();
+    if (httpCode != 200)
+    {
+        Serial.printf("Error HTTP: %d\n", httpCode);
+        http.end();
+        delete client;
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+
+    // Leer cabecera: título y username
+    uint16_t titleLen = (stream->read() << 8) | stream->read();
+    uint16_t usernameLen = (stream->read() << 8) | stream->read();
+
+    char title[titleLen + 1];
+    char username[usernameLen + 1];
+
+    for (int i = 0; i < titleLen; i++)
+        title[i] = stream->read();
+    for (int i = 0; i < usernameLen; i++)
+        username[i] = stream->read();
+    title[titleLen] = '\0';
+    username[usernameLen] = '\0';
+
+    // 🟥 ANIMACIÓN DE CUADRADOS DE COLORES
+    int centerX = 32;
+    int centerY = 32;
+    uint16_t colors[] = {color1, color2, color3, color4, color5};
+    int numColors = 5;
+
+    for (int colorIndex = 0; colorIndex < numColors; colorIndex++)
+    {
+        for (int size = 2; size <= max(PANEL_RES_X, PANEL_RES_Y); size += 2)
+        {
+            // Dibujar el cuadrado actual
+            for (int y = centerY - size / 2; y <= centerY + size / 2; y++)
+            {
+                for (int x = centerX - size / 2; x <= centerX + size / 2; x++)
+                {
+                    if (x >= 0 && x < PANEL_RES_X && y >= 0 && y < PANEL_RES_Y)
+                    {
+                        dma_display->drawPixel(x, y, colors[colorIndex]);
+                    }
+                }
+            }
+            delay(5); // Ajusta este valor para controlar la velocidad de la animación
+        }
+    }
+
+    // 🖼️ IMAGEN
+
+    // Reservamos el buffer de la imagen entera en RAM
+    const int width = 64;
+    const int height = 64;
+    const int totalPixels = width * height;
+    const int totalBytes = totalPixels * 3;
+
+    uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
+    if (!imageBuffer)
+    {
+        Serial.println("Error: no hay suficiente memoria para cargar la imagen.");
+        http.end();
+        delete client;
+        return;
+    }
+
+    // Leer toda la imagen RGB888 (64x64x3)
+    size_t read = stream->readBytes(imageBuffer, totalBytes);
+    if (read != totalBytes)
+    {
+        Serial.printf("Error: se esperaban %d bytes, pero se recibieron %d\n", totalBytes, read);
+        free(imageBuffer);
+        http.end();
+        delete client;
+        return;
+    }
+
+    // Mostrar imagen desde el centro
     for (int radius = 0; radius <= max(width, height); radius++)
     {
         for (int y = centerY - radius; y <= centerY + radius; y++)
@@ -385,143 +534,47 @@ void showPhotoFromCenter(JsonArray &data, int width, int height, String title, S
             {
                 if (x >= 0 && x < width && y >= 0 && y < height)
                 {
-                    // Solo dibujamos los píxeles en el borde del cuadrado actual
                     if (abs(x - centerX) == radius || abs(y - centerY) == radius)
                     {
-                        JsonArray row = data[y].as<JsonArray>();
-                        uint16_t color = row[x];
+                        int index = (y * width + x) * 3;
+                        uint8_t r = imageBuffer[index + 2]; // ⚠️ BGR → RGB
+                        uint8_t g = imageBuffer[index + 0];
+                        uint8_t b = imageBuffer[index + 1];
+                        uint16_t color = dma_display->color565(r, g, b);
                         dma_display->drawPixel(x, y, color);
                     }
                 }
             }
         }
-        delay(5); // Ajusta este valor para controlar la velocidad de la animación
+        delay(5); // Controla la velocidad de la animación
     }
-    showPhotoInfo(title, name);
-}
+    showPhotoInfo(String(title), String(username));
 
-// Función para mostrar una foto (ya existente)
-void showPhoto(int photoIndex)
-{
-    getPixie();
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
-    songShowing = "photo";
-
-    Serial.println("Conectando al servidor para obtener la foto...");
-    http.begin(*client, String(serverUrl) + "public/photo/" + "get-photo/?id=" + String(photoIndex));
-    Serial.println(String(serverUrl) + "public/photo/" + "get-photo/?id=" + String(photoIndex));
-    int httpCode = http.GET();
-
-    if (httpCode == 200)
-    {
-        Serial.println("Foto recibida. Mostrando en el panel...");
-        String payload = http.getString();
-        DynamicJsonDocument doc(200000); // Aumentado de 100000 a 150000
-        DeserializationError error = deserializeJson(doc, payload);
-        if (error)
-        {
-            Serial.print("Error al parsear JSON: ");
-            Serial.println(error.c_str());
-            showTime();
-            http.end();
-            delete client;
-            fadeIn();
-            return;
-        }
-        JsonObject photo = doc["photo"].as<JsonObject>();
-        JsonArray data = photo["data"].as<JsonArray>();
-        int width = photo["width"];
-        int height = photo["height"];
-        String title = doc["title"].as<String>();
-        String name = doc["username"].as<String>();
-        fadeOut();
-        Serial.println("Title: " + title);
-        Serial.println("Username: " + name);
-        dma_display->clearScreen();
-        for (int y = 0; y < height; y++)
-        {
-            JsonArray row = data[y].as<JsonArray>();
-            for (int x = 0; x < width; x++)
-            {
-                uint16_t color = row[x];
-                dma_display->drawPixel(x, y, color);
-            }
-        }
-        showPhotoInfo(title, name);
-        fadeIn();
-    }
-    else
-    {
-        Serial.printf("Error en la solicitud: %d\n", httpCode);
-        showTime();
-        fadeIn();
-    }
+    free(imageBuffer);
     http.end();
     delete client;
+}
+
+void showPhotoIndex(int photoIndex)
+{
+    String url = String(serverUrl) + "public/photo/get-photo?index=" + String(photoIndex);
+    showPhoto(url);
+}
+
+void showPhotoId(int photoId)
+{
+    String url = String(serverUrl) + "public/photo/get-photo?id=" + String(photoId);
+    showPhoto(url);
 }
 
 // Función para la animación de nueva foto
-void onReceiveNewPic()
+void onReceiveNewPic(int id)
 {
-    // Reiniciar el índice de foto a 0
-    photoIndex = 0;
+    photoIndex = 1;
 
-    // Obtener y mostrar la nueva foto
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
-
-    http.begin(*client, String(serverUrl) + "public/photo/" + "get-photo/?id=" + String(photoIndex));
-    int httpCode = http.GET();
-
-    if (httpCode == 200)
-    {
-        String payload = http.getString();
-        DynamicJsonDocument doc(200000);
-        DeserializationError error = deserializeJson(doc, payload);
-
-        if (!error)
-        {
-            JsonObject photo = doc["photo"].as<JsonObject>();
-            JsonArray data = photo["data"].as<JsonArray>();
-            int width = photo["width"];
-            int height = photo["height"];
-            String title = doc["title"].as<String>();
-            String name = doc["username"].as<String>();
-
-
-            // Animación de cuadrados crecientes
-            int centerX = PANEL_RES_X / 2;
-            int centerY = PANEL_RES_Y / 2;
-
-            uint16_t colors[] = {color1, color2, color3, color4, color5};
-            int numColors = 5;
-
-            for (int colorIndex = 0; colorIndex < numColors; colorIndex++)
-            {
-                for (int size = 2; size <= max(PANEL_RES_X, PANEL_RES_Y); size += 2)
-                {
-                    // Dibujar el cuadrado actual
-                    for (int y = centerY - size / 2; y <= centerY + size / 2; y++)
-                    {
-                        for (int x = centerX - size / 2; x <= centerX + size / 2; x++)
-                        {
-                            if (x >= 0 && x < PANEL_RES_X && y >= 0 && y < PANEL_RES_Y)
-                            {
-                                dma_display->drawPixel(x, y, colors[colorIndex]);
-                            }
-                        }
-                    }
-                    delay(5); // Ajusta este valor para controlar la velocidad de la animación
-                }
-            }
-            // Mostrar la foto con animación desde el centro
-            showPhotoFromCenter(data, width, height, title, name);
-        }
-    }
-
-    http.end();
-    delete client;
+    String url = String(serverUrl) + "public/photo/get-photo?id=" + String(id);
+    // Mostrar la foto con animación desde el centro
+    showPhotoFromCenter(url);
 }
 
 void showUpdateMessage()
@@ -548,9 +601,9 @@ void checkForUpdates()
 
     if (httpCode == 200)
     {
-        String payload = http.getString();
         StaticJsonDocument<1024> doc;
-        DeserializationError error = deserializeJson(doc, payload);
+        delay(250); // Puede ayudar
+        DeserializationError error = deserializeJson(doc, http.getStream());
         if (!error)
         {
             int latestVersion = doc["version"];
@@ -644,9 +697,9 @@ void registerPixie()
 
     if (httpCode == 200)
     {
-        String payload = http.getString();
         DynamicJsonDocument responseDoc(2048); // Aumentado de 200 a 2048
-        DeserializationError error = deserializeJson(responseDoc, payload);
+        delay(250);                            // Puede ayudar
+        DeserializationError error = deserializeJson(responseDoc, http.getStream());
         if (!error)
         {
             pixieId = responseDoc["pixie"]["id"];
@@ -707,7 +760,8 @@ void showAPCredentials(const char *ssid, const char *password)
 }
 
 // Función para manejar los mensajes MQTT recibidos
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
+void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
     // Crear un buffer para el mensaje
     char message[length + 1];
     memcpy(message, payload, length);
@@ -721,12 +775,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     DynamicJsonDocument doc(1024);
     DeserializationError error = deserializeJson(doc, message);
 
-    if (!error) {
-        const char* action = doc["action"];
-        if (action) {
-            if (strcmp(action, "update_photo") == 0) {
-                onReceiveNewPic();
-            } else if (strcmp(action, "update_info") == 0) {
+    if (!error)
+    {
+        const char *action = doc["action"];
+        if (action)
+        {
+            if (strcmp(action, "update_photo") == 0)
+            {
+                Serial.println("Se recibio una nueva foto por MQTT");
+                int id = doc["id"];
+                onReceiveNewPic(id);
+            }
+            else if (strcmp(action, "update_info") == 0)
+            {
                 getPixie();
             }
         }
@@ -734,18 +795,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 // Función para reconectar al broker MQTT
-void mqttReconnect() {
-    while (!mqttClient.connected()) {
+void mqttReconnect()
+{
+    while (!mqttClient.connected())
+    {
         Serial.print("Intentando conexión MQTT...");
         String clientId = String(MQTT_CLIENT_ID) + String(pixieId);
-        
-        if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD)) {
+
+        if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
+        {
             Serial.println("conectado");
             // Suscribirse al tema específico del pixie
             String topic = String("pixie/") + String(pixieId);
             Serial.println("Suscribiendo al tema: " + topic);
             mqttClient.subscribe(topic.c_str());
-        } else {
+        }
+        else
+        {
             Serial.print("falló, rc=");
             Serial.print(mqttClient.state());
             Serial.println(" reintentando en 5 segundos");
@@ -755,74 +821,92 @@ void mqttReconnect() {
 }
 
 // Función para dibujar el logo con efecto arcoiris
-void drawLogo() {
-    static uint8_t hue = 0; // Variable estática para mantener el estado del color
+void drawLogo()
+{
+    static uint8_t hue = 0;   // Variable estática para mantener el estado del color
     const int LOGO_SIZE = 32; // Tamaño del logo (32x32)
-    const int offset = 16;
-    
-    for (int y = 0; y < LOGO_SIZE; y++) {
-        for (int x = 0; x < LOGO_SIZE; x++) {
+    const int offsetX = 16;
+    const int offsetY = 10;
+
+    for (int y = 0; y < LOGO_SIZE; y++)
+    {
+        for (int x = 0; x < LOGO_SIZE; x++)
+        {
             int index = y * LOGO_SIZE + x;
             const uint32_t pixel = logo[0][index];
-            
+
             // Extraer los componentes ARGB
             uint8_t alpha = (pixel >> 24) & 0xFF;
             uint8_t red = (pixel >> 16) & 0xFF;
             uint8_t green = (pixel >> 8) & 0xFF;
             uint8_t blue = pixel & 0xFF;
-            
-            if (alpha > 0) { // Si el píxel no es transparente
-                if (red == 0xFF && green == 0xFF && blue == 0xFF) { // Si el píxel es blanco
+
+            if (alpha > 0)
+            { // Si el píxel no es transparente
+                if (red == 0xFF && green == 0xFF && blue == 0xFF)
+                { // Si el píxel es blanco
                     // Convertir el color HSV a RGB
                     uint8_t r, g, b;
                     uint8_t h = hue + (x + y) * 2; // Variar el tono según la posición
-                    uint8_t s = 255; // Saturación máxima
-                    uint8_t v = 255; // Valor máximo
-                    
+                    uint8_t s = 255;               // Saturación máxima
+                    uint8_t v = 255;               // Valor máximo
+
                     // Conversión HSV a RGB
                     uint8_t region = h / 43;
                     uint8_t remainder = (h - (region * 43)) * 6;
                     uint8_t p = (v * (255 - s)) >> 8;
                     uint8_t q = (v * (255 - ((s * remainder) >> 8))) >> 8;
                     uint8_t t = (v * (255 - ((s * (255 - remainder)) >> 8))) >> 8;
-                    
-                    switch (region) {
-                        case 0:
-                            r = v; g = t; b = p;
-                            break;
-                        case 1:
-                            r = q; g = v; b = p;
-                            break;
-                        case 2:
-                            r = p; g = v; b = t;
-                            break;
-                        case 3:
-                            r = p; g = q; b = v;
-                            break;
-                        case 4:
-                            r = t; g = p; b = v;
-                            break;
-                        default:
-                            r = v; g = p; b = q;
-                            break;
+
+                    switch (region)
+                    {
+                    case 0:
+                        r = v;
+                        g = t;
+                        b = p;
+                        break;
+                    case 1:
+                        r = q;
+                        g = v;
+                        b = p;
+                        break;
+                    case 2:
+                        r = p;
+                        g = v;
+                        b = t;
+                        break;
+                    case 3:
+                        r = p;
+                        g = q;
+                        b = v;
+                        break;
+                    case 4:
+                        r = t;
+                        g = p;
+                        b = v;
+                        break;
+                    default:
+                        r = v;
+                        g = p;
+                        b = q;
+                        break;
                     }
-                    
+
                     // Dibujar el píxel con el nuevo color
-                    dma_display->drawPixel(x + offset, y + offset, dma_display->color565(r, b, g));
-                } else {
+                    dma_display->drawPixel(x + offsetX, y + offsetY, dma_display->color565(r, b, g));
+                }
+                else
+                {
                     // Mantener el color original para píxeles no blancos
-                    dma_display->drawPixel(x + offset, y + offset, dma_display->color565(red, blue, green));
+                    dma_display->drawPixel(x + offsetX, y + offsetY, dma_display->color565(red, blue, green));
                 }
             }
         }
     }
-    
+
     // Incrementar el tono para la siguiente llamada
     hue += 2;
 }
-
-// Función para mostrar un mensaje de carga centrado
-
 
 void setup()
 {
@@ -837,7 +921,6 @@ void setup()
     dma_display->setBrightness8(max(brightness, 10));
     dma_display->clearScreen();
     dma_display->setRotation(135);
-    
 
     // Inicializar Preferences para leer/guardar las credenciales
     preferences.begin("wifi", false);
@@ -937,11 +1020,11 @@ void setup()
 
         // Configurar cliente WiFi seguro para MQTT
         espClient.setInsecure();
-        
+
         // Configuración de MQTT
         mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
         mqttClient.setCallback(mqttCallback);
-        
+
         // Intentar conectar a MQTT
         mqttReconnect();
     }
@@ -1021,7 +1104,8 @@ void loop()
     else
     {
         // Manejo de MQTT
-        if (!mqttClient.connected()) {
+        if (!mqttClient.connected())
+        {
             mqttReconnect();
         }
         mqttClient.loop();
@@ -1034,7 +1118,8 @@ void loop()
             {
                 if (millis() - lastPhotoChange >= secsPhotos)
                 {
-                    showPhoto(photoIndex++);
+                    // showPhoto(photoIndex++);
+                    showPhotoIndex(photoIndex++);
                     lastPhotoChange = millis();
                     if (photoIndex >= maxPhotos)
                     {
@@ -1044,6 +1129,7 @@ void loop()
             }
             else
             {
+                lastPhotoChange = 0;
                 if (songShowing != songOnline)
                 {
                     songShowing = songOnline;
@@ -1053,9 +1139,11 @@ void loop()
         }
         else
         {
+            showPhotoIndex(photoIndex++);
             if (millis() - lastPhotoChange >= secsPhotos)
             {
-                showPhoto(photoIndex++);
+                // showPhoto(photoIndex++);
+                showPhotoIndex(photoIndex++);
                 lastPhotoChange = millis();
                 if (photoIndex >= maxPhotos)
                 {
