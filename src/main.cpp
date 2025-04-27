@@ -53,7 +53,7 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = true;
+const bool DEV = false;
 const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
@@ -62,6 +62,8 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 String songShowing = "";
 unsigned long lastPhotoChange = -60000;
 unsigned long secsPhotos = 30000; // 30 segundos por defecto
+unsigned long lastSpotifyCheck = 0;
+unsigned long timeToCheckSpotify = 5000; // 5 segundos
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
@@ -80,6 +82,17 @@ WiFiClient *getWiFiClient()
         WiFiClientSecure *clientSecure = new WiFiClientSecure();
         clientSecure->setInsecure();
         return clientSecure;
+    }
+}
+
+void wait(int ms)
+{
+    unsigned long startTime = millis();
+    while (millis() - startTime < ms)
+    {
+        mqttClient.loop();
+        ArduinoOTA.handle();
+        yield();
     }
 }
 
@@ -137,17 +150,25 @@ void showWiFiIcon(int n)
 }
 
 // Función para mostrar el porcentaje durante la actualización OTA (ya existente)
+int lastPercentage = 0;
 void showPercetage(int percentage)
 {
-    dma_display->clearScreen();
     dma_display->setTextSize(1);
     dma_display->setTextColor(myWHITE);
     dma_display->setFont(&FreeSans12pt7b);
-    dma_display->setCursor(8, 38); // Centrar en el panel
-    dma_display->print((percentage < 10 ? "0" : "") + String(min(percentage, 99)) + "%");
-    dma_display->setFont();
-    dma_display->setCursor(8, 50); // Centrar en el panel
-    dma_display->print("Updating");
+    if (lastPercentage != percentage)
+    {
+        dma_display->fillRect(0, 0, PANEL_RES_X, 40, myBLACK);
+        dma_display->setCursor(8, 38); // Centrar en el panel
+        dma_display->print((percentage < 10 ? "0" : "") + String(min(percentage, 99)) + "%");
+        lastPercentage = percentage;
+    }
+    if (percentage < 2)
+    {
+        dma_display->setFont();
+        dma_display->setCursor(8, 50); // Centrar en el panel
+        dma_display->print("Updating");
+    }
 }
 
 // Función para mostrar la hora en el panel (ya existente)
@@ -212,6 +233,7 @@ void fetchAndDrawCover()
             Serial.println(error.c_str());
             showTime();
             http.end();
+            delay(50);
             delete client;
             return;
         }
@@ -231,6 +253,7 @@ void fetchAndDrawCover()
         showTime();
     }
     http.end();
+    delay(50);
     delete client;
 }
 
@@ -251,6 +274,7 @@ String fetchSongId()
         {
             String songId = doc["id"].as<String>();
             http.end();
+            delay(50);
             delete client;
             if (songId == "" || songId == "null")
             {
@@ -273,6 +297,7 @@ String fetchSongId()
         Serial.printf("Error en la solicitud: %d\n", httpCode);
     }
     http.end();
+    delay(50);
     delete client;
     return "";
 }
@@ -333,6 +358,7 @@ void getPixie()
         Serial.printf("Failed to fetch Pixie details. HTTP code: %d\n", httpCode);
     }
     http.end();
+    delay(50);
     delete client;
 }
 
@@ -385,6 +411,7 @@ void showPhoto(String url)
     {
         Serial.printf("Error HTTP: %d\n", httpCode);
         http.end();
+        delay(50);
         delete client;
         return;
     }
@@ -436,6 +463,7 @@ void showPhoto(String url)
     showPhotoInfo(String(title), String(username));
 
     http.end();
+    delay(50);
     delete client;
 }
 
@@ -452,6 +480,7 @@ void showPhotoFromCenter(const String &url)
     {
         Serial.printf("Error HTTP: %d\n", httpCode);
         http.end();
+        delay(50);
         delete client;
         return;
     }
@@ -510,6 +539,7 @@ void showPhotoFromCenter(const String &url)
     {
         Serial.println("Error: no hay suficiente memoria para cargar la imagen.");
         http.end();
+        delay(50);
         delete client;
         return;
     }
@@ -521,6 +551,7 @@ void showPhotoFromCenter(const String &url)
         Serial.printf("Error: se esperaban %d bytes, pero se recibieron %d\n", totalBytes, read);
         free(imageBuffer);
         http.end();
+        delay(50);
         delete client;
         return;
     }
@@ -552,7 +583,10 @@ void showPhotoFromCenter(const String &url)
 
     free(imageBuffer);
     http.end();
+    delay(50);
     delete client;
+    songShowing = "";
+    wait(secsPhotos);
 }
 
 void showPhotoIndex(int photoIndex)
@@ -579,9 +613,12 @@ void onReceiveNewPic(int id)
 
 void showUpdateMessage()
 {
+    dma_display->clearScreen();
+    Serial.println("Se limpia pantalla");
     dma_display->setFont();
     dma_display->setCursor(8, 50); // Centrar en el panel
     dma_display->print("Updating");
+    Serial.println("Se muestra mensaje de actualizacion");
 }
 
 void showCheckMessage()
@@ -591,12 +628,11 @@ void showCheckMessage()
 
 void checkForUpdates()
 {
-    WiFiClientSecure client;
+    WiFiClient *client = getWiFiClient();
     HTTPClient http;
-    client.setInsecure();
-    showCheckMessage();
-    Serial.println("Checking for updates...");
-    http.begin(client, String(serverUrl) + "version/latest");
+
+    Serial.println("Conectando a: " + String(serverUrl) + "public/version/latest");
+    http.begin(*client, String(serverUrl) + "public/version/latest");
     int httpCode = http.GET();
 
     if (httpCode == 200)
@@ -608,13 +644,15 @@ void checkForUpdates()
         {
             int latestVersion = doc["version"];
             String updateUrl = doc["url"].as<String>();
+            Serial.println("Latest version: " + String(latestVersion));
+            Serial.println("Update URL: " + updateUrl);
 
             if (latestVersion > currentVersion)
             {
                 Serial.printf("New version available: %d\n", latestVersion);
                 showUpdateMessage();
                 Serial.println("Downloading update...");
-                http.begin(client, updateUrl);
+                http.begin(*client, updateUrl);
                 int updateHttpCode = http.GET();
 
                 if (updateHttpCode == 200)
@@ -636,7 +674,9 @@ void checkForUpdates()
                             if (Update.end())
                             {
                                 Serial.println("Update successfully completed.");
-                                preferences.putInt("currentVersion", latestVersion);
+                                // TODO: Guardar la nueva version
+                                // preferences.putInt("currentVersion", latestVersion);
+                                preferences.putInt("currentVersion", 0);
                                 ESP.restart();
                             }
                             else
@@ -675,6 +715,7 @@ void checkForUpdates()
         Serial.printf("Failed to check for updates. HTTP code: %d\n", httpCode);
     }
     http.end();
+    delay(50);
 }
 
 void registerPixie()
@@ -717,6 +758,7 @@ void registerPixie()
         Serial.printf("Failed to register Pixie. HTTP code: %d\n", httpCode);
     }
     http.end();
+    delay(50);
     delete client;
 }
 
@@ -789,6 +831,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             else if (strcmp(action, "update_info") == 0)
             {
                 getPixie();
+            }
+            else if (strcmp(action, "update_bin") == 0)
+            {
+                Serial.println("Se recibio una actualizacion de binario por MQTT");
+                checkForUpdates();
             }
         }
     }
@@ -932,101 +979,94 @@ void setup()
     pixieId = preferences.getInt("pixieId", 0);
     secsPhotos = preferences.getUInt("secsPhotos", 30000); // Leer el intervalo de cambio de fotos
 
-    // Si no hay credenciales guardadas se activa el modo AP
+    // Si no hay credenciales guardadas se activa el modo AP inmediatamente
     if (storedSSID == "")
     {
-        apMode = true;
         Serial.println("No se encontraron credenciales WiFi. Iniciando modo AP...");
+        apMode = true;
         WiFi.mode(WIFI_AP);
         WiFi.softAP("Pixie", "12345678");
-
-        // Mostrar credenciales en el panel
         showAPCredentials("Pixie", "12345678");
-
-        // Definir las rutas del servidor web
-        server.on("/", HTTP_GET, []()
-                  {
-      String html = "<html><head><title>Configurar WiFi</title>";
-      html += "<style>";
-      html += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; background-color: #f5f5f5; }";
-      html += ".container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }";
-      html += "h1 { color: #333; text-align: center; margin-bottom: 30px; }";
-      html += ".form-group { margin-bottom: 20px; }";
-      html += "label { display: block; margin-bottom: 5px; color: #666; }";
-      html += "input[type='text'], input[type='password'] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }";
-      html += "button { width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }";
-      html += "button:hover { background-color: #45a049; }";
-      html += "</style></head><body>";
-      html += "<div class='container'>";
-      html += "<h1>Configurar WiFi</h1>";
-      html += "<form action='/save' method='POST'>";
-      html += "<div class='form-group'>";
-      html += "<label for='ssid'>SSID:</label>";
-      html += "<input type='text' id='ssid' name='ssid' required>";
-      html += "</div>";
-      html += "<div class='form-group'>";
-      html += "<label for='password'>Contraseña:</label>";
-      html += "<input type='password' id='password' name='password' required>";
-      html += "</div>";
-      html += "<button type='submit'>Guardar</button>";
-      html += "</form>";
-      html += "</div>";
-      html += "</body></html>";
-      server.send(200, "text/html", html); });
-
-        server.on("/health", HTTP_GET, []()
-                  { server.send(200, "application/json", "{\"status\":\"ok\"}"); });
-
-        server.on("/save", HTTP_POST, []()
-                  {
-      if (server.hasArg("ssid") && server.hasArg("password"))
-      {
-        String newSSID = server.arg("ssid");
-        String newPassword = server.arg("password");
-        bool newAllowSpotify = server.hasArg("allowSpotify");
-        int newMaxPhotos = server.arg("maxPhotos").toInt();
-        // Guardar las credenciales en Preferences
-        preferences.putString("ssid", newSSID);
-        preferences.putString("password", newPassword);
-        String response = "Credenciales guardadas. Reiniciando...";
-        server.send(200, "text/html", response);
-        delay(1000);
-        ESP.restart();
-      }
-      else
-      {
-        server.send(400, "text/html", "Faltan datos");
-      } });
-        server.begin();
     }
     else
     {
-        // Si se encontraron credenciales, conectar en modo STA
+        // Si hay credenciales, intentar conectar en modo STA
         Serial.println("Conectando a WiFi usando credenciales almacenadas...");
         WiFi.mode(WIFI_STA);
         WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
+        
+        unsigned long startAttemptTime = millis();
         int wifiIconCounter = 0;
         // pintar toda la pantalla de blanco
         dma_display->clearScreen();
         dma_display->fillScreen(myWHITE);
-        while (WiFi.status() != WL_CONNECTED)
+        
+        while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) // 30 segundos timeout
         {
             drawLogo();
             showLoadingMsg("Connecting WiFi");
             delay(10);
         }
-        Serial.println("\nWiFi conectado!");
-        showLoadingMsg("Connected to WiFi");
 
-        // Configurar cliente WiFi seguro para MQTT
-        espClient.setInsecure();
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("No se pudo conectar al WiFi. Activando modo AP...");
+            apMode = true;
+            WiFi.mode(WIFI_AP);
+            WiFi.softAP("Pixie", "12345678");
+            showAPCredentials("Pixie", "12345678");
+        } else {
+            Serial.println("\nWiFi conectado!");
+            showLoadingMsg("Connected to WiFi");
 
-        // Configuración de MQTT
-        mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
-        mqttClient.setCallback(mqttCallback);
+            // Configurar cliente WiFi seguro para MQTT
+            espClient.setInsecure();
 
-        // Intentar conectar a MQTT
-        mqttReconnect();
+            // Configuración de MQTT
+            mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
+            mqttClient.setCallback(mqttCallback);
+        }
+    }
+
+    // Configurar servidor web si estamos en modo AP
+    if (apMode) {
+        // Definir las rutas del servidor web
+        server.on("/", HTTP_GET, []()
+        {
+            String html = "<html><head><title>Configurar WiFi</title>";
+            html += "<style>";
+            html += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; background-color: #f5f5f5; }";
+            html += ".container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }";
+            html += "h1 { color: #333; text-align: center; margin-bottom: 30px; }";
+            html += ".form-group { margin-bottom: 20px; }";
+            html += "label { display: block; margin-bottom: 5px; color: #666; }";
+            html += "input[type='text'], input[type='password'] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }";
+            html += "button { width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }";
+            html += "button:hover { background-color: #45a049; }";
+            html += "</style></head><body>";
+            html += "<div class='container'>";
+            html += "<h1>Configurar WiFi</h1>";
+            html += "<form action='/save' method='POST'>";
+            html += "<div class='form-group'>";
+            html += "<label for='ssid'>SSID:</label>";
+            html += "<input type='text' id='ssid' name='ssid' required>";
+            html += "</div>";
+            html += "<div class='form-group'>";
+            html += "<label for='password'>Contraseña:</label>";
+            html += "<input type='password' id='password' name='password' required>";
+            html += "</div>";
+            html += "<button type='submit'>Guardar</button>";
+            html += "</form>";
+            html += "</div>";
+            html += "</body></html>";
+            server.send(200, "text/html", html);
+        });
+
+        server.on("/health", HTTP_GET, []()
+        {
+            server.send(200, "application/json", "{\"status\":\"ok\"}");
+        });
+
+        server.begin();
     }
 
     // Configuración de OTA (se activa tanto en modo AP como STA)
@@ -1106,19 +1146,23 @@ void loop()
         // Manejo de MQTT
         if (!mqttClient.connected())
         {
-            mqttReconnect();
+            //mqttReconnect();
         }
-        mqttClient.loop();
+        //mqttClient.loop();
 
         // Si estamos conectados a WiFi (modo STA), se ejecuta la lógica original:
         if (allowSpotify)
         {
-            songOnline = fetchSongId();
+            if (millis() - lastSpotifyCheck >= timeToCheckSpotify)
+            {
+                songOnline = fetchSongId();
+                lastSpotifyCheck = millis();
+            }
             if (songOnline == "" || songOnline == "null")
             {
                 if (millis() - lastPhotoChange >= secsPhotos)
                 {
-                    // showPhoto(photoIndex++);
+                    songShowing = "";
                     showPhotoIndex(photoIndex++);
                     lastPhotoChange = millis();
                     if (photoIndex >= maxPhotos)
@@ -1129,7 +1173,7 @@ void loop()
             }
             else
             {
-                lastPhotoChange = 0;
+                lastPhotoChange = -secsPhotos;
                 if (songShowing != songOnline)
                 {
                     songShowing = songOnline;
@@ -1151,10 +1195,6 @@ void loop()
                 }
             }
         }
-        delay(1000);
-        for (int i = 0; i < 10; i++)
-        {
-            ArduinoOTA.handle();
-        }
+        wait(1000);
     }
 }
