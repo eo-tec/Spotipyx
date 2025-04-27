@@ -119,6 +119,15 @@ void showLoadingMsg(String msg)
     dma_display->print(msg);
 }
 
+// Buffer para la pantalla (ya existente)
+uint16_t screenBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer to store the current screen content
+
+void drawPixelWithBuffer(int x, int y, uint16_t color) {
+    dma_display->drawPixel(x, y, color);
+    screenBuffer[y][x] = color;
+}
+
+
 // Función para mostrar el icono de WiFi parpadeando (ya existente)
 void showWiFiIcon(int n)
 {
@@ -144,7 +153,7 @@ void showWiFiIcon(int n)
     {
         for (int x = 0; x < 32; x++)
         {
-            dma_display->drawPixel(x + 16, y + 16, draw[y][x] > 0 ? myWHITE : myBLACK);
+            drawPixelWithBuffer(x + 16, y + 16, draw[y][x] > 0 ? myWHITE : myBLACK);
         }
     }
 }
@@ -187,8 +196,7 @@ void showTime()
     Serial.println(currentTime);
 }
 
-// Buffer para la pantalla (ya existente)
-uint16_t screenBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer to store the current screen content
+
 
 // Función para animación "push up" (ya existente)
 void pushUpAnimation(int y, JsonArray &data)
@@ -200,7 +208,7 @@ void pushUpAnimation(int y, JsonArray &data)
         for (int j = 0; j < PANEL_RES_X; j++)
         {
             uint16_t color = row[j];
-            dma_display->drawPixel(j, i, color);
+            drawPixelWithBuffer(j, i, color);
         }
     }
     unsigned long endTime = millis();
@@ -305,18 +313,51 @@ String fetchSongId()
 // Funciones de fade in/out (ya existentes)
 void fadeOut()
 {
-    for (int b = brightness; b >= 0; b--)
+    const int steps = 20;
+    for (int step = 0; step <= steps; step++)
     {
-        dma_display->setBrightness8(b);
+        for (int y = 0; y < PANEL_RES_Y; y++)
+        {
+            for (int x = 0; x < PANEL_RES_X; x++)
+            {
+                uint16_t color = screenBuffer[y][x];
+                uint8_t r = ((color >> 11) & 0x1F) << 3;
+                uint8_t g = ((color >> 5) & 0x3F) << 2;
+                uint8_t b = (color & 0x1F) << 3;
+
+                r = r * (steps - step) / steps;
+                g = g * (steps - step) / steps;
+                b = b * (steps - step) / steps;
+
+                dma_display->drawPixel(x, y, dma_display->color565(r, g, b));
+            }
+        }
         delay(30);
     }
 }
 
+
 void fadeIn()
 {
-    for (int b = 0; b <= brightness; b++)
+    const int steps = 20;
+    for (int step = 0; step <= steps; step++)
     {
-        dma_display->setBrightness8(b);
+        for (int y = 0; y < PANEL_RES_Y; y++)
+        {
+            for (int x = 0; x < PANEL_RES_X; x++)
+            {
+                uint16_t color = screenBuffer[y][x];
+                uint8_t r = ((color >> 11) & 0x1F) << 3;
+                uint8_t g = ((color >> 5) & 0x3F) << 2;
+                uint8_t b = (color & 0x1F) << 3;
+
+                r = r * step / steps;
+                g = g * step / steps;
+                b = b * step / steps;
+
+                dma_display->drawPixel(x, y, dma_display->color565(r, g, b));
+            }
+        }
         delay(30);
     }
 }
@@ -455,7 +496,7 @@ void showPhoto(String url)
             uint8_t r = lineBuffer[x * 3 + 2];
 
             uint16_t color = dma_display->color565(r, g, b);
-            dma_display->drawPixel(x, y, color);
+            screenBuffer[y][x] = color;
         }
     }
 
@@ -518,7 +559,7 @@ void showPhotoFromCenter(const String &url)
                 {
                     if (x >= 0 && x < PANEL_RES_X && y >= 0 && y < PANEL_RES_Y)
                     {
-                        dma_display->drawPixel(x, y, colors[colorIndex]);
+                        drawPixelWithBuffer(x, y, colors[colorIndex]);
                     }
                 }
             }
@@ -572,7 +613,7 @@ void showPhotoFromCenter(const String &url)
                         uint8_t g = imageBuffer[index + 0];
                         uint8_t b = imageBuffer[index + 1];
                         uint16_t color = dma_display->color565(r, g, b);
-                        dma_display->drawPixel(x, y, color);
+                        drawPixelWithBuffer(x, y, color);
                     }
                 }
             }
@@ -586,7 +627,6 @@ void showPhotoFromCenter(const String &url)
     delay(50);
     delete client;
     songShowing = "";
-    wait(secsPhotos);
 }
 
 void showPhotoIndex(int photoIndex)
@@ -609,6 +649,9 @@ void onReceiveNewPic(int id)
     String url = String(serverUrl) + "public/photo/get-photo?id=" + String(id);
     // Mostrar la foto con animación desde el centro
     showPhotoFromCenter(url);
+    lastPhotoChange = millis(); 
+    photoIndex = 0; 
+    songShowing = "";
 }
 
 void showUpdateMessage()
@@ -940,12 +983,12 @@ void drawLogo()
                     }
 
                     // Dibujar el píxel con el nuevo color
-                    dma_display->drawPixel(x + offsetX, y + offsetY, dma_display->color565(r, b, g));
+                    drawPixelWithBuffer(x + offsetX, y + offsetY, dma_display->color565(r, b, g));
                 }
                 else
                 {
                     // Mantener el color original para píxeles no blancos
-                    dma_display->drawPixel(x + offsetX, y + offsetY, dma_display->color565(red, blue, green));
+                    drawPixelWithBuffer(x + offsetX, y + offsetY, dma_display->color565(red, blue, green));
                 }
             }
         }
@@ -994,13 +1037,13 @@ void setup()
         Serial.println("Conectando a WiFi usando credenciales almacenadas...");
         WiFi.mode(WIFI_STA);
         WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
-        
+
         unsigned long startAttemptTime = millis();
         int wifiIconCounter = 0;
         // pintar toda la pantalla de blanco
         dma_display->clearScreen();
         dma_display->fillScreen(myWHITE);
-        
+
         while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) // 30 segundos timeout
         {
             drawLogo();
@@ -1008,13 +1051,16 @@ void setup()
             delay(10);
         }
 
-        if (WiFi.status() != WL_CONNECTED) {
+        if (WiFi.status() != WL_CONNECTED)
+        {
             Serial.println("No se pudo conectar al WiFi. Activando modo AP...");
             apMode = true;
             WiFi.mode(WIFI_AP);
             WiFi.softAP("Pixie", "12345678");
             showAPCredentials("Pixie", "12345678");
-        } else {
+        }
+        else
+        {
             Serial.println("\nWiFi conectado!");
             showLoadingMsg("Connected to WiFi");
 
@@ -1028,10 +1074,11 @@ void setup()
     }
 
     // Configurar servidor web si estamos en modo AP
-    if (apMode) {
+    if (apMode)
+    {
         // Definir las rutas del servidor web
         server.on("/", HTTP_GET, []()
-        {
+                  {
             String html = "<html><head><title>Configurar WiFi</title>";
             html += "<style>";
             html += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; background-color: #f5f5f5; }";
@@ -1058,13 +1105,10 @@ void setup()
             html += "</form>";
             html += "</div>";
             html += "</body></html>";
-            server.send(200, "text/html", html);
-        });
+            server.send(200, "text/html", html); });
 
         server.on("/health", HTTP_GET, []()
-        {
-            server.send(200, "application/json", "{\"status\":\"ok\"}");
-        });
+                  { server.send(200, "application/json", "{\"status\":\"ok\"}"); });
 
         server.begin();
     }
@@ -1146,9 +1190,9 @@ void loop()
         // Manejo de MQTT
         if (!mqttClient.connected())
         {
-            //mqttReconnect();
+            // mqttReconnect();
         }
-        //mqttClient.loop();
+        // mqttClient.loop();
 
         // Si estamos conectados a WiFi (modo STA), se ejecuta la lógica original:
         if (allowSpotify)
