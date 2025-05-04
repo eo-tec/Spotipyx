@@ -67,7 +67,6 @@ unsigned long timeToCheckSpotify = 5000; // 5 segundos
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
-WebServer server(80);
 bool apMode = false; // Se activará si no hay credenciales guardadas
 bool allowSpotify = true;
 
@@ -814,7 +813,7 @@ void testInit()
     preferences.begin("wifi", false);
     preferences.putInt("currentVersion", 0);
     preferences.putInt("pixieId", 0);
-    preferences.putInt("brightness", 10);
+    preferences.putInt("brightness", 50);
     preferences.putInt("maxPhotos", 5);
     preferences.putUInt("secsPhotos", 30000);
     preferences.putBool("allowSpotify", true);
@@ -998,6 +997,29 @@ void drawLogo()
     hue += 2;
 }
 
+// Función para procesar las credenciales recibidas por Serial
+bool processCredentials(String input) {
+    // Formato esperado: #SSID;ssid#PASS;contraseña
+    if (!input.startsWith("#SSID;")) {
+        return false;
+    }
+
+    // Extraer SSID
+    int ssidStart = input.indexOf("#SSID;") + 6;
+    int ssidEnd = input.indexOf("#PASS;");
+    String ssid = input.substring(ssidStart, ssidEnd);
+
+    // Extraer contraseña
+    int passStart = ssidEnd + 6;
+    String password = input.substring(passStart);
+
+    // Guardar las credenciales
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", password);
+
+    return true;
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -1020,139 +1042,112 @@ void setup()
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
     pixieId = preferences.getInt("pixieId", 0);
-    secsPhotos = preferences.getUInt("secsPhotos", 30000); // Leer el intervalo de cambio de fotos
+    secsPhotos = preferences.getUInt("secsPhotos", 30000);
 
-    // Si no hay credenciales guardadas se activa el modo AP inmediatamente
-    if (storedSSID == "")
-    {
-        Serial.println("No se encontraron credenciales WiFi. Iniciando modo AP...");
-        apMode = true;
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("Pixie", "12345678");
-        showAPCredentials("Pixie", "12345678");
-    }
-    else
-    {
-        // Si hay credenciales, intentar conectar en modo STA
-        Serial.println("Conectando a WiFi usando credenciales almacenadas...");
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
-
-        unsigned long startAttemptTime = millis();
-        int wifiIconCounter = 0;
-        // pintar toda la pantalla de blanco
-        dma_display->clearScreen();
+    // Si no hay credenciales guardadas, esperar por Serial
+    if (storedSSID == "") {
+        Serial.println("Esperando credenciales WiFi...");
         dma_display->fillScreen(myWHITE);
-
-        while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) // 30 segundos timeout
-        {
+        showLoadingMsg("Waiting WiFi pass");
+        
+        while (true) {
             drawLogo();
-            showLoadingMsg("Connecting WiFi");
-            delay(10);
-        }
-
-        if (WiFi.status() != WL_CONNECTED)
-        {
-            Serial.println("No se pudo conectar al WiFi. Activando modo AP...");
-            apMode = true;
-            WiFi.mode(WIFI_AP);
-            WiFi.softAP("Pixie", "12345678");
-            showAPCredentials("Pixie", "12345678");
-        }
-        else
-        {
-            Serial.println("\nWiFi conectado!");
-            showLoadingMsg("Connected to WiFi");
-
-            // Configurar cliente WiFi seguro para MQTT
-            espClient.setInsecure();
-
-            // Configuración de MQTT
-            mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
-            mqttClient.setCallback(mqttCallback);
+            if (Serial.available()) {
+                String input = Serial.readStringUntil('\n');
+                input.trim();
+                
+                if (processCredentials(input)) {
+                    Serial.println("OK");
+                    storedSSID = preferences.getString("ssid", "");
+                    storedPassword = preferences.getString("password", "");
+                    break;
+                } else {
+                    Serial.println("ERROR");
+                }
+            }
+            delay(100);
         }
     }
 
-    // Configurar servidor web si estamos en modo AP
-    if (apMode)
-    {
-        // Definir las rutas del servidor web
-        server.on("/", HTTP_GET, []()
-                  {
-            String html = "<html><head><title>Configurar WiFi</title>";
-            html += "<style>";
-            html += "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; background-color: #f5f5f5; }";
-            html += ".container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }";
-            html += "h1 { color: #333; text-align: center; margin-bottom: 30px; }";
-            html += ".form-group { margin-bottom: 20px; }";
-            html += "label { display: block; margin-bottom: 5px; color: #666; }";
-            html += "input[type='text'], input[type='password'] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }";
-            html += "button { width: 100%; padding: 12px; background-color: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }";
-            html += "button:hover { background-color: #45a049; }";
-            html += "</style></head><body>";
-            html += "<div class='container'>";
-            html += "<h1>Configurar WiFi</h1>";
-            html += "<form action='/save' method='POST'>";
-            html += "<div class='form-group'>";
-            html += "<label for='ssid'>SSID:</label>";
-            html += "<input type='text' id='ssid' name='ssid' required>";
-            html += "</div>";
-            html += "<div class='form-group'>";
-            html += "<label for='password'>Contraseña:</label>";
-            html += "<input type='password' id='password' name='password' required>";
-            html += "</div>";
-            html += "<button type='submit'>Guardar</button>";
-            html += "</form>";
-            html += "</div>";
-            html += "</body></html>";
-            server.send(200, "text/html", html); });
+    // Intentar conectar a WiFi
+    Serial.println("Conectando a WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
 
-        server.on("/health", HTTP_GET, []()
-                  { server.send(200, "application/json", "{\"status\":\"ok\"}"); });
+    unsigned long startAttemptTime = millis();
+    dma_display->clearScreen();
+    dma_display->fillScreen(myWHITE);
 
-        server.begin();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
+        drawLogo();
+        showLoadingMsg("Connecting WiFi");
+        delay(10);
     }
 
-    // Configuración de OTA (se activa tanto en modo AP como STA)
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("ERROR");
+        showLoadingMsg("Waiting WiFi pass");
+        while (true) {
+            if (Serial.available()) {
+                String input = Serial.readStringUntil('\n');
+                input.trim();
+                
+                if (processCredentials(input)) {
+                    delay(150);
+                    Serial.println("OK");
+                    delay(150);
+                    ESP.restart();
+                    break;
+                } else {
+                    Serial.println("ERROR");
+                }
+            }
+            delay(100);
+        }
+        ESP.restart();
+    } else {
+        Serial.println("OK");
+        showLoadingMsg("Connected to WiFi");
+
+        // Configurar cliente WiFi seguro para MQTT
+        espClient.setInsecure();
+
+        // Configuración de MQTT
+        mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
+        mqttClient.setCallback(mqttCallback);
+    }
+
+    // Configuración de OTA
     ArduinoOTA.setHostname(("Pixie-" + String(pixieId)).c_str());
-    ArduinoOTA.onStart([]()
-                       {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH)
-      type = "sketch";
-    else
-      type = "filesystem";
-    Serial.println("Inicio de actualización OTA: " + type); });
-    ArduinoOTA.onEnd([]()
-                     { Serial.println("\nActualización OTA completada."); });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                          {
-    Serial.printf("Progreso: %u%%\n", (progress / (total / 100)));
-    showPercetage((progress / (total / 100))); });
-    ArduinoOTA.onError([](ota_error_t error)
-                       {
-    Serial.printf("Error [%u]: ", error);
-    if (error == OTA_AUTH_ERROR)
-      Serial.println("Error de autenticación");
-    else if (error == OTA_BEGIN_ERROR)
-      Serial.println("Error al iniciar");
-    else if (error == OTA_CONNECT_ERROR)
-      Serial.println("Error de conexión");
-    else if (error == OTA_RECEIVE_ERROR)
-      Serial.println("Error al recibir");
-    else if (error == OTA_END_ERROR)
-      Serial.println("Error al finalizar"); });
+    ArduinoOTA.onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH)
+            type = "sketch";
+        else
+            type = "filesystem";
+        Serial.println("Inicio de actualización OTA: " + type);
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nActualización OTA completada.");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("Progreso: %u%%\n", (progress / (total / 100)));
+        showPercetage((progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("Error [%u]: ", error);
+        if (error == OTA_AUTH_ERROR)
+            Serial.println("Error de autenticación");
+        else if (error == OTA_BEGIN_ERROR)
+            Serial.println("Error al iniciar");
+        else if (error == OTA_CONNECT_ERROR)
+            Serial.println("Error de conexión");
+        else if (error == OTA_RECEIVE_ERROR)
+            Serial.println("Error al recibir");
+        else if (error == OTA_END_ERROR)
+            Serial.println("Error al finalizar");
+    });
     ArduinoOTA.begin();
-
-    if (apMode)
-    {
-        while (true)
-        {
-            server.handleClient();
-            ArduinoOTA.handle();
-            delay(10);
-        }
-    }
 
     timeClient.begin();
     timeClient.setTimeOffset(7200);
@@ -1162,12 +1157,9 @@ void setup()
     checkForUpdates();
 
     // Register Pixie if not registered
-    if (pixieId == 0)
-    {
+    if (pixieId == 0) {
         registerPixie();
-    }
-    else
-    {
+    } else {
         getPixie();
     }
     showLoadingMsg("Ready!");
@@ -1177,68 +1169,43 @@ String songOnline = "";
 
 void loop()
 {
-    // Si estamos en modo AP, solo atender el servidor web y OTA
-    if (apMode)
-    {
-        server.handleClient();
-        ArduinoOTA.handle();
-        delay(10);
-        return;
-    }
-    else
-    {
-        // Manejo de MQTT
-        if (!mqttClient.connected())
-        {
-            // mqttReconnect();
-        }
-        // mqttClient.loop();
+    // Manejo de MQTT
+    if (!mqttClient.connected()) {
+        mqttReconnect();
+    }else{
+        mqttClient.loop();
+    }    
 
-        // Si estamos conectados a WiFi (modo STA), se ejecuta la lógica original:
-        if (allowSpotify)
-        {
-            if (millis() - lastSpotifyCheck >= timeToCheckSpotify)
-            {
-                songOnline = fetchSongId();
-                lastSpotifyCheck = millis();
-            }
-            if (songOnline == "" || songOnline == "null")
-            {
-                if (millis() - lastPhotoChange >= secsPhotos)
-                {
-                    songShowing = "";
-                    showPhotoIndex(photoIndex++);
-                    lastPhotoChange = millis();
-                    if (photoIndex >= maxPhotos)
-                    {
-                        photoIndex = 0;
-                    }
-                }
-            }
-            else
-            {
-                lastPhotoChange = -secsPhotos;
-                if (songShowing != songOnline)
-                {
-                    songShowing = songOnline;
-                    fetchAndDrawCover();
-                }
-            }
+    // Si estamos conectados a WiFi, se ejecuta la lógica original:
+    if (allowSpotify) {
+        if (millis() - lastSpotifyCheck >= timeToCheckSpotify) {
+            songOnline = fetchSongId();
+            lastSpotifyCheck = millis();
         }
-        else
-        {
-            showPhotoIndex(photoIndex++);
-            if (millis() - lastPhotoChange >= secsPhotos)
-            {
-                // showPhoto(photoIndex++);
+        if (songOnline == "" || songOnline == "null") {
+            if (millis() - lastPhotoChange >= secsPhotos) {
+                songShowing = "";
                 showPhotoIndex(photoIndex++);
                 lastPhotoChange = millis();
-                if (photoIndex >= maxPhotos)
-                {
+                if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
             }
+        } else {
+            lastPhotoChange = -secsPhotos;
+            if (songShowing != songOnline) {
+                songShowing = songOnline;
+                fetchAndDrawCover();
+            }
         }
-        wait(1000);
+    } else {
+        if (millis() - lastPhotoChange >= secsPhotos) {
+            showPhotoIndex(photoIndex++);
+            lastPhotoChange = millis();
+            if (photoIndex >= maxPhotos) {
+                photoIndex = 0;
+            }
+        }
     }
+    wait(1000);
 }
