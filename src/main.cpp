@@ -379,10 +379,12 @@ void getPixie()
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
-            dma_display->setBrightness(max(brightness, 10));
+            dma_display->setBrightness(max(brightness, 10));    
             preferences.putInt("brightness", brightness);
             maxPhotos = doc["pixie"]["pictures_on_queue"];
+            allowSpotify = doc["pixie"]["spotify_enabled"];
             preferences.putInt("maxPhotos", maxPhotos);
+            preferences.putBool("allowSpotify", allowSpotify);
             int secsBetweenPhotos = doc["pixie"]["secs_between_photos"];
             secsPhotos = secsBetweenPhotos * 1000; // Convertir a milisegundos
             preferences.putUInt("secsPhotos", secsPhotos);
@@ -630,7 +632,8 @@ void showPhotoFromCenter(const String &url)
 
 void showPhotoIndex(int photoIndex)
 {
-    String url = String(serverUrl) + "public/photo/get-photo?index=" + String(photoIndex);
+    String url = String(serverUrl) + "public/photo/get-photo-by-pixie?index=" + String(photoIndex) + "&pixieId=" + String(pixieId);
+    Serial.println("Llamando a: " + url);
     showPhoto(url);
 }
 
@@ -816,7 +819,9 @@ void testInit()
     preferences.putInt("brightness", 50);
     preferences.putInt("maxPhotos", 5);
     preferences.putUInt("secsPhotos", 30000);
-    preferences.putBool("allowSpotify", true);
+    preferences.putString("ssid", "");
+    preferences.putString("password", "");
+    preferences.putBool("allowSpotify", false);
     Serial.println("Preferencias reiniciadas a valores de fábrica");
 }
 
