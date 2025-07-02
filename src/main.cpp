@@ -64,6 +64,7 @@ unsigned long lastPhotoChange = -60000;
 unsigned long secsPhotos = 30000; // 30 segundos por defecto
 unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
+String activationCode = "0000";
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
@@ -376,6 +377,7 @@ void getPixie()
         DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
         delay(250);                    // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
+        Serial.println(doc["pixie"]["code"].as<String>());
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
@@ -388,6 +390,8 @@ void getPixie()
             int secsBetweenPhotos = doc["pixie"]["secs_between_photos"];
             secsPhotos = secsBetweenPhotos * 1000; // Convertir a milisegundos
             preferences.putUInt("secsPhotos", secsPhotos);
+            activationCode = doc["pixie"]["code"].as<String>();
+            preferences.putString("code", activationCode);
         }
         else
         {
@@ -789,8 +793,10 @@ void registerPixie()
         if (!error)
         {
             pixieId = responseDoc["pixie"]["id"];
+            String activationCode = responseDoc["code"].as<String>();
             preferences.putInt("pixieId", pixieId);
-            Serial.printf("Pixie registered with ID: %d\n", pixieId);
+            preferences.putString("code", activationCode);
+            Serial.printf("Pixie registered with ID: %d and code: %s\n", pixieId, activationCode.c_str());
         }
         else
         {
@@ -822,6 +828,7 @@ void testInit()
     preferences.putString("ssid", "");
     preferences.putString("password", "");
     preferences.putBool("allowSpotify", false);
+    preferences.putString("code", "0000"); // Inicializar el código de activación vacío
     Serial.println("Preferencias reiniciadas a valores de fábrica");
 }
 
@@ -1025,6 +1032,47 @@ bool processCredentials(String input) {
     return true;
 }
 
+void showActivationCode(String code) {
+    dma_display->clearScreen();
+    dma_display->setTextSize(1);
+    dma_display->setTextColor(myWHITE);
+    dma_display->setFont(&Picopixel);
+    
+    // Mostrar "Activation code:"
+    dma_display->setCursor(6, 10);
+    dma_display->print("Activation code:");
+    
+    // Mostrar el código
+    dma_display->setFont(&FreeSans12pt7b);
+    int16_t x1, y1;
+    uint16_t w, h;
+    dma_display->getTextBounds(code, 0, 55, &x1, &y1, &w, &h);
+    int16_t centeredX = (PANEL_RES_X - w) / 2;
+    dma_display->setCursor(centeredX, 40);
+    dma_display->print(code);
+    dma_display->setFont(&Picopixel);
+}
+
+void checkActivation() {
+    String currentCode = preferences.getString("code", "0000");
+    Serial.println(currentCode);
+    if (currentCode != "0000") {
+        showActivationCode(currentCode);
+        
+        // Polling cada 2 segundos hasta que el código sea "0000"
+        while (currentCode != "0000") {
+            getPixie(); // Esto actualizará el código si ha cambiado
+            currentCode = preferences.getString("code", "0000");
+            delay(2000);
+        }
+        
+        // Una vez activado, mostrar mensaje de éxito
+        dma_display->clearScreen();
+        showLoadingMsg("Device activated!");
+        delay(2000);
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -1048,6 +1096,7 @@ void setup()
     currentVersion = preferences.getInt("currentVersion", 0);
     pixieId = preferences.getInt("pixieId", 0);
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
+    activationCode = preferences.getString("code", "0000");
 
     // Si no hay credenciales guardadas, esperar por Serial
     if (storedSSID == "") {
@@ -1167,6 +1216,10 @@ void setup()
     } else {
         getPixie();
     }
+
+    // Verificar estado de activación
+    checkActivation();
+
     showLoadingMsg("Ready!");
 }
 
