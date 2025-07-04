@@ -70,6 +70,7 @@ String activationCode = "0000";
 Preferences preferences;
 bool apMode = false; // Se activará si no hay credenciales guardadas
 bool allowSpotify = true;
+WebServer webServer(80); // Servidor web para configuración WiFi
 
 WiFiClient *getWiFiClient()
 {
@@ -185,7 +186,9 @@ void showTime()
 {
     dma_display->clearScreen();
     timeClient.update();
-    String currentTime = String(timeClient.getHours() < 10 ? "0" : "") + String(timeClient.getHours()) + ":" +
+    // Añadir offset local para mostrar (UTC+2 para España)
+    int localHours = (timeClient.getHours() + 2) % 24;
+    String currentTime = String(localHours < 10 ? "0" : "") + String(localHours) + ":" +
                          String(timeClient.getMinutes() < 10 ? "0" : "") + String(timeClient.getMinutes());
     dma_display->setTextSize(1);
     dma_display->setTextColor(myWHITE);
@@ -232,7 +235,7 @@ void fetchAndDrawCover()
 
     if (httpCode == 200)
     {
-        DynamicJsonDocument doc(150000); // Ajusta esto si tienes PSRAM
+        JsonDocument doc;
         delay(250);                      // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
         if (error)
@@ -275,7 +278,7 @@ String fetchSongId()
 
     if (httpCode == 200)
     {
-        DynamicJsonDocument doc(2048); // Ajusta esto si tienes PSRAM
+        JsonDocument doc;
         delay(250);                    // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
         if (!error)
@@ -374,7 +377,7 @@ void getPixie()
 
     if (httpCode == 200)
     {
-        DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
+        JsonDocument doc;
         delay(250);                    // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
         Serial.println(doc["pixie"]["code"].as<String>());
@@ -677,6 +680,18 @@ void showCheckMessage()
 
 void checkForUpdates()
 {
+    // Asegurar que el tiempo esté sincronizado antes de la actualización
+    timeClient.update();
+    time_t now = timeClient.getEpochTime();
+    Serial.println("Current time (UTC): " + String(now));
+    Serial.println("Current time (formatted): " + timeClient.getFormattedTime());
+    
+    // Configurar el tiempo del sistema para URLs firmadas
+    struct timeval tv;
+    tv.tv_sec = now;
+    tv.tv_usec = 0;
+    settimeofday(&tv, NULL);
+    
     WiFiClient *client = getWiFiClient();
     HTTPClient http;
 
@@ -686,7 +701,7 @@ void checkForUpdates()
 
     if (httpCode == 200)
     {
-        StaticJsonDocument<1024> doc;
+        JsonDocument doc;
         delay(250); // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
         if (!error)
@@ -701,13 +716,28 @@ void checkForUpdates()
                 Serial.printf("New version available: %d\n", latestVersion);
                 showUpdateMessage();
                 Serial.println("Downloading update...");
-                http.begin(*client, updateUrl);
-                int updateHttpCode = http.GET();
+                http.end();
+                delete client;
+                
+                // Detectar si la URL es HTTP o HTTPS y crear el cliente apropiado
+                WiFiClient *updateClient;
+                if (updateUrl.startsWith("https://")) {
+                    WiFiClientSecure *secureClient = new WiFiClientSecure();
+                    secureClient->setInsecure();
+                    updateClient = secureClient;
+                } else {
+                    updateClient = new WiFiClient();
+                }
+                
+                HTTPClient updateHttp;
+                updateHttp.begin(*updateClient, updateUrl);
+                updateHttp.setTimeout(30000); // 30 segundos timeout
+                int updateHttpCode = updateHttp.GET();
 
                 if (updateHttpCode == 200)
                 {
-                    WiFiClient *updateClient = http.getStreamPtr();
-                    size_t contentLength = http.getSize();
+                    WiFiClient *updateStream = updateHttp.getStreamPtr();
+                    size_t contentLength = updateHttp.getSize();
                     Update.onProgress([](size_t written, size_t total)
                                       {
             int percent = (written * 100) / total;
@@ -716,7 +746,7 @@ void checkForUpdates()
 
                     if (Update.begin(contentLength))
                     {
-                        size_t written = Update.writeStream(*updateClient);
+                        size_t written = Update.writeStream(*updateStream);
                         if (written == contentLength)
                         {
                             Serial.println("Update successfully written.");
@@ -724,8 +754,7 @@ void checkForUpdates()
                             {
                                 Serial.println("Update successfully completed.");
                                 // TODO: Guardar la nueva version
-                                // preferences.putInt("currentVersion", latestVersion);
-                                preferences.putInt("currentVersion", 0);
+                                preferences.putInt("currentVersion", latestVersion);
                                 ESP.restart();
                             }
                             else
@@ -746,7 +775,15 @@ void checkForUpdates()
                 else
                 {
                     Serial.printf("Failed to download update. HTTP code: %d\n", updateHttpCode);
+                    if (updateHttpCode == 404) {
+                        Serial.println("Update file not found or URL expired. Retrying in next check...");
+                    }
+                    // Imprimir la respuesta para debug
+                    String response = updateHttp.getString();
+                    Serial.println("Response body: " + response);
                 }
+                updateHttp.end();
+                delete updateClient;
             }
             else
             {
@@ -765,6 +802,7 @@ void checkForUpdates()
     }
     http.end();
     delay(50);
+    delete client;
 }
 
 void registerPixie()
@@ -778,7 +816,7 @@ void registerPixie()
     http.begin(*client, String(serverUrl) + "public/pixie/add");
     http.addHeader("Content-Type", "application/json");
 
-    DynamicJsonDocument doc(2048); // Aumentado de 200 a 2048
+    JsonDocument doc;
     doc["mac"] = macAddress;
     String requestBody;
     serializeJson(doc, requestBody);
@@ -787,7 +825,7 @@ void registerPixie()
 
     if (httpCode == 200)
     {
-        DynamicJsonDocument responseDoc(2048); // Aumentado de 200 a 2048
+        JsonDocument responseDoc;
         delay(250);                            // Puede ayudar
         DeserializationError error = deserializeJson(responseDoc, http.getStream());
         if (!error)
@@ -868,7 +906,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     Serial.println("Mensaje: " + String(message));
 
     // Crear un documento JSON
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
 
     if (!error)
@@ -1009,6 +1047,270 @@ void drawLogo()
     hue += 2;
 }
 
+// Función para generar la página HTML de configuración WiFi
+String generateConfigHTML() {
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>Pixie WiFi Setup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{text-align:center;color:#333}
+.form-group{margin-bottom:15px}
+label{display:block;margin-bottom:5px;font-weight:bold}
+input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}
+button{background:#4CAF50;color:white;padding:12px 20px;border:none;border-radius:5px;cursor:pointer;width:100%;margin-top:10px}
+button:hover{background:#45a049}
+.scan-btn{background:#2196F3;margin-bottom:10px}
+.network-item{padding:8px;background:#f9f9f9;border:1px solid #ddd;margin:5px 0;cursor:pointer}
+.network-item:hover{background:#e3f2fd}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Pixie WiFi Setup</h1>
+<form method="post" action="/connect">
+<div class="form-group">
+<a href="/scan"><button type="button" class="scan-btn">Scan Networks</button></a>
+</div>
+<div class="form-group">
+<label for="ssid">WiFi Network:</label>
+<input type="text" name="ssid" required>
+</div>
+<div class="form-group">
+<label for="password">Password:</label>
+<input type="password" name="password" required>
+</div>
+<button type="submit">Connect to WiFi</button>
+</form>
+<div class="form-group">
+<a href="/reset"><button type="button" class="scan-btn">Reset Device</button></a>
+</div>
+</div>
+</body>
+</html>)";
+    return html;
+}
+
+// Función para manejar el escaneo de redes WiFi
+void handleWifiScan() {
+    Serial.println("Scanning WiFi networks...");
+    int networkCount = WiFi.scanNetworks();
+    
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>WiFi Networks - Pixie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{text-align:center;color:#333}
+.network-item{padding:10px;background:#f9f9f9;border:1px solid #ddd;margin:5px 0;cursor:pointer;border-radius:5px}
+.network-item:hover{background:#e3f2fd}
+.back-btn{background:#666;color:white;padding:10px;text-decoration:none;border-radius:5px;display:inline-block;margin-bottom:20px}
+</style>
+</head>
+<body>
+<div class="container">
+<a href="/" class="back-btn">Back</a>
+<h1>Available Networks</h1>)";
+    
+    for (int i = 0; i < networkCount; i++) {
+        html += "<div class=\"network-item\" onclick=\"selectNetwork('" + WiFi.SSID(i) + "')\">";
+        html += "<strong>" + WiFi.SSID(i) + "</strong><br>";
+        html += "Signal: " + String(WiFi.RSSI(i)) + " dBm | ";
+        html += String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "Open" : "Encrypted");
+        html += "</div>";
+    }
+    
+    html += R"(
+<script>
+function selectNetwork(ssid) {
+    localStorage.setItem('selectedSSID', ssid);
+    window.location.href = '/';
+}
+window.onload = function() {
+    var ssid = localStorage.getItem('selectedSSID');
+    if (ssid) {
+        var input = parent.document.querySelector('input[name="ssid"]');
+        if (input) input.value = ssid;
+    }
+};
+</script>
+</div>
+</body>
+</html>)";
+    
+    webServer.send(200, "text/html", html);
+    WiFi.scanDelete();
+}
+
+// Función para manejar la conexión WiFi
+void handleWifiConnect() {
+    String ssid = webServer.arg("ssid");
+    String password = webServer.arg("password");
+    
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>Connecting - Pixie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{color:#333}
+.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold}
+.success{background:#d4edda;color:#155724;border:1px solid #c3e6cb}
+.error{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb}
+.loading{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb}
+</style>
+</head>
+<body>
+<div class="container">)";
+    
+    if (ssid.length() > 0) {
+        html += "<h1>Connecting to WiFi...</h1>";
+        html += "<div class=\"status loading\">Connecting to: " + ssid + "</div>";
+        
+        // Guardar credenciales
+        preferences.putString("ssid", ssid);
+        preferences.putString("password", password);
+        
+        // Enviar respuesta inmediatamente
+        webServer.send(200, "text/html", html + R"(
+<script>
+setTimeout(function() {
+    window.location.href = '/status';
+}, 3000);
+</script>
+</div>
+</body>
+</html>)");
+        
+        // Intentar conectar en segundo plano
+        WiFi.begin(ssid.c_str(), password.c_str());
+        
+        // Dar tiempo para que se envíe la respuesta
+        delay(1000);
+        
+        // Esperar hasta 10 segundos para la conexión
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            attempts++;
+        }
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            apMode = false;
+            ESP.restart();
+        }
+    } else {
+        html += "<h1>Error</h1>";
+        html += "<div class=\"status error\">SSID is required</div>";
+        html += "<a href=\"/\" style=\"color:#007bff;text-decoration:none\">Go Back</a>";
+        webServer.send(400, "text/html", html + "</div></body></html>");
+    }
+}
+
+// Función para manejar el reset del dispositivo
+void handleDeviceReset() {
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>Reset - Pixie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{color:#333}
+.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold;background:#d4edda;color:#155724}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Device Reset</h1>
+<div class="status">Device reset successfully! Restarting...</div>
+<p>Please reconnect to the Pixie AP to configure WiFi again.</p>
+</div>
+</body>
+</html>)";
+    
+    webServer.send(200, "text/html", html);
+    delay(2000);
+    preferences.clear();
+    ESP.restart();
+}
+
+// Función para manejar el status de conexión
+void handleConnectionStatus() {
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>Status - Pixie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="3">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{color:#333}
+.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold}
+.success{background:#d4edda;color:#155724}
+.error{background:#f8d7da;color:#721c24}
+.loading{background:#d1ecf1;color:#0c5460}
+</style>
+</head>
+<body>
+<div class="container">)";
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        html += "<h1>Connected!</h1>";
+        html += "<div class=\"status success\">Successfully connected to WiFi</div>";
+        html += "<p>IP Address: " + WiFi.localIP().toString() + "</p>";
+        html += "<p>Device will restart in normal mode...</p>";
+        webServer.send(200, "text/html", html + "</div></body></html>");
+        delay(3000);
+        apMode = false;
+        ESP.restart();
+    } else {
+        html += "<h1>Connection Failed</h1>";
+        html += "<div class=\"status error\">Failed to connect to WiFi</div>";
+        html += "<a href=\"/\" style=\"color:#007bff;text-decoration:none;padding:10px;background:#f8f9fa;border-radius:5px;display:inline-block;margin-top:20px\">Try Again</a>";
+        webServer.send(200, "text/html", html + "</div></body></html>");
+    }
+}
+
+// Función para configurar el servidor web en modo AP
+void setupWebServer() {
+    webServer.on("/", HTTP_GET, []() {
+        webServer.send(200, "text/html", generateConfigHTML());
+    });
+    
+    webServer.on("/scan", HTTP_GET, handleWifiScan);
+    webServer.on("/connect", HTTP_POST, handleWifiConnect);
+    webServer.on("/reset", HTTP_GET, handleDeviceReset);
+    webServer.on("/status", HTTP_GET, handleConnectionStatus);
+    
+    webServer.begin();
+    Serial.println("Web server started on http://192.168.4.1");
+}
+
+// Función para iniciar el modo AP
+void startAPMode() {
+    apMode = true;
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("Pixie", "12345678");
+    
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP IP address: ");
+    Serial.println(IP);
+    
+    setupWebServer();
+    showAPCredentials("Pixie", "12345678");
+}
+
 // Función para procesar las credenciales recibidas por Serial
 bool processCredentials(String input) {
     // Formato esperado: #SSID;ssid#PASS;contraseña
@@ -1098,29 +1400,11 @@ void setup()
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
     activationCode = preferences.getString("code", "0000");
 
-    // Si no hay credenciales guardadas, esperar por Serial
+    // Si no hay credenciales guardadas, iniciar modo AP
     if (storedSSID == "") {
-        Serial.println("Esperando credenciales WiFi...");
-        dma_display->fillScreen(myWHITE);
-        showLoadingMsg("Waiting WiFi pass");
-        
-        while (true) {
-            drawLogo();
-            if (Serial.available()) {
-                String input = Serial.readStringUntil('\n');
-                input.trim();
-                
-                if (processCredentials(input)) {
-                    Serial.println("OK");
-                    storedSSID = preferences.getString("ssid", "");
-                    storedPassword = preferences.getString("password", "");
-                    break;
-                } else {
-                    Serial.println("ERROR");
-                }
-            }
-            delay(100);
-        }
+        Serial.println("No WiFi credentials found. Starting AP mode...");
+        startAPMode();
+        return; // Sale del setup, el modo AP seguirá corriendo en el loop
     }
 
     // Intentar conectar a WiFi
@@ -1139,26 +1423,9 @@ void setup()
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("ERROR");
-        showLoadingMsg("Waiting WiFi pass");
-        while (true) {
-            if (Serial.available()) {
-                String input = Serial.readStringUntil('\n');
-                input.trim();
-                
-                if (processCredentials(input)) {
-                    delay(150);
-                    Serial.println("OK");
-                    delay(150);
-                    ESP.restart();
-                    break;
-                } else {
-                    Serial.println("ERROR");
-                }
-            }
-            delay(100);
-        }
-        ESP.restart();
+        Serial.println("Failed to connect to WiFi. Starting AP mode...");
+        startAPMode();
+        return; // Sale del setup, el modo AP seguirá corriendo en el loop
     } else {
         Serial.println("OK");
         showLoadingMsg("Connected to WiFi");
@@ -1204,7 +1471,7 @@ void setup()
     ArduinoOTA.begin();
 
     timeClient.begin();
-    timeClient.setTimeOffset(7200);
+    timeClient.setTimeOffset(0); // UTC para AWS S3 URLs firmadas
     timeClient.update();
 
     // Check for updates
@@ -1227,6 +1494,21 @@ String songOnline = "";
 
 void loop()
 {
+    // Si estamos en modo AP, manejar el servidor web
+    if (apMode) {
+        webServer.handleClient();
+        
+        // Refrescar la pantalla cada 5 segundos para mantener visible la información
+        static unsigned long lastRefresh = 0;
+        if (millis() - lastRefresh > 5000) {
+            showAPCredentials("Pixie", "12345678");
+            lastRefresh = millis();
+        }
+        
+        delay(10);
+        return;
+    }
+
     // Manejo de MQTT
     if (!mqttClient.connected()) {
         mqttReconnect();

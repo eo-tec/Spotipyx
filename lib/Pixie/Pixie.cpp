@@ -72,7 +72,7 @@ String Pixie::getSongId()
     if (httpCode == 200)
     {
         String payload = http.getString();
-        DynamicJsonDocument doc(2048);
+        JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
         if (!error)
         {
@@ -110,7 +110,7 @@ int Pixie::registerPixie(const String &macAddress)
     http.begin(*client, String(serverUrl) + "public/pixie/add");
     http.addHeader("Content-Type", "application/json");
 
-    DynamicJsonDocument doc(2048);
+    JsonDocument doc;
     doc["mac"] = macAddress;
     String requestBody;
     serializeJson(doc, requestBody);
@@ -121,7 +121,7 @@ int Pixie::registerPixie(const String &macAddress)
     if (httpCode == 200)
     {
         String payload = http.getString();
-        DynamicJsonDocument responseDoc(2048);
+        JsonDocument responseDoc;
         DeserializationError error = deserializeJson(responseDoc, payload);
         if (!error)
         {
@@ -178,7 +178,7 @@ void Pixie::checkForUpdates(MatrixPanel_I2S_DMA *dma_display, Preferences &prefe
     if (httpCode == 200)
     {
         String payload = http.getString();
-        StaticJsonDocument<1024> doc;
+        JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
         if (!error)
         {
@@ -345,7 +345,7 @@ void Pixie::showPhoto(MatrixPanel_I2S_DMA *dma_display, int photoIndex, int pixi
     if (!payload.isEmpty())
     {
         Serial.println("Foto recibida. Mostrando en el panel...");
-        DynamicJsonDocument doc(150000);
+        JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
         if (error)
         {
