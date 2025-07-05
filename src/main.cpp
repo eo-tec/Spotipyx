@@ -53,7 +53,7 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = false;
+const bool DEV = true;
 const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
@@ -65,6 +65,31 @@ unsigned long secsPhotos = 30000; // 30 segundos por defecto
 unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
 String activationCode = "0000";
+
+// Variables para el modo de dibujo
+bool drawingMode = false;
+uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer separado para dibujo
+unsigned long lastDrawingActivity = 0;
+const unsigned long DRAWING_TIMEOUT = 300000; // 5 minutos sin actividad
+
+// Buffer de comandos de dibujo
+struct DrawCommand {
+    int x;
+    int y;
+    uint16_t color;
+    int size;
+};
+const int MAX_DRAW_COMMANDS = 100;
+DrawCommand drawCommandBuffer[MAX_DRAW_COMMANDS];
+int drawCommandCount = 0;
+unsigned long lastDrawingUpdate = 0;
+const unsigned long DRAWING_UPDATE_INTERVAL = 20; // Actualizar cada 20ms (50 FPS)
+
+// Dirty rectangle tracking
+int dirtyMinX = PANEL_RES_X;
+int dirtyMaxX = -1;
+int dirtyMinY = PANEL_RES_Y;
+int dirtyMaxY = -1;
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
@@ -128,6 +153,179 @@ void drawPixelWithBuffer(int x, int y, uint16_t color) {
     screenBuffer[y][x] = color;
 }
 
+// ===== FUNCIONES DE DIBUJO =====
+
+// Función para entrar en modo dibujo
+void enterDrawingMode() {
+    drawingMode = true;
+    lastDrawingActivity = millis();
+    
+    if (!DEV) {
+        Serial.println("Entering drawing mode");
+    }
+    
+    // Inicializar buffer de dibujo con canvas negro
+    for (int y = 0; y < PANEL_RES_Y; y++) {
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            drawingBuffer[y][x] = myBLACK;
+        }
+    }
+    
+    // Limpiar pantalla y mostrar canvas negro
+    dma_display->clearScreen();
+}
+
+// Función para salir del modo dibujo
+void exitDrawingMode() {
+    drawingMode = false;
+    
+    if (!DEV) {
+        Serial.println("Exiting drawing mode");
+    }
+    
+    // Volver al modo normal (mostrar fotos)
+    dma_display->clearScreen();
+    // La próxima iteración del loop mostrará una foto
+}
+
+// Función para actualizar la pantalla con el buffer de dibujo
+void updateDrawingDisplay() {
+    if (!drawingMode) return;
+    
+    for (int y = 0; y < PANEL_RES_Y; y++) {
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            dma_display->drawPixel(x, y, drawingBuffer[y][x]);
+        }
+    }
+}
+
+// Función para dibujar un píxel en modo dibujo
+void drawDrawingPixel(int x, int y, uint16_t color) {
+    if (!drawingMode) {
+        return;
+    }
+    
+    // Validar coordenadas
+    if (x < 0 || x >= PANEL_RES_X || y < 0 || y >= PANEL_RES_Y) {
+        return;
+    }
+    
+    // Solo actualizar el buffer, no dibujar directamente
+    drawingBuffer[y][x] = color;
+    
+    // Actualizar timestamp de actividad
+    lastDrawingActivity = millis();
+}
+
+// Función para dibujar múltiples píxeles (stroke)
+void drawDrawingStroke(JsonArray points, uint16_t color) {
+    if (!drawingMode) return;
+    
+    for (JsonVariant point : points) {
+        int x = point["x"];
+        int y = point["y"];
+        drawDrawingPixel(x, y, color);
+    }
+}
+
+// Función para limpiar el canvas de dibujo
+void clearDrawingCanvas() {
+    if (!drawingMode) return;
+    
+    // Limpiar buffer de comandos pendientes
+    drawCommandCount = 0;
+    
+    // Limpiar buffer de dibujo
+    for (int y = 0; y < PANEL_RES_Y; y++) {
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            drawingBuffer[y][x] = myBLACK;
+        }
+    }
+    
+    // Limpiar pantalla
+    dma_display->clearScreen();
+    
+    // Actualizar timestamp de actividad
+    lastDrawingActivity = millis();
+}
+
+// Función para verificar timeout del modo dibujo
+void checkDrawingTimeout() {
+    if (drawingMode && (millis() - lastDrawingActivity > DRAWING_TIMEOUT)) {
+        if (!DEV) {
+            Serial.println("Drawing mode timeout - returning to photo mode");
+        }
+        exitDrawingMode();
+    }
+}
+
+// Función para convertir RGB565 a componentes RGB
+void rgb565ToRgb(uint16_t rgb565, uint8_t &r, uint8_t &g, uint8_t &b) {
+    r = ((rgb565 >> 11) & 0x1F) << 3;
+    g = ((rgb565 >> 5) & 0x3F) << 2;
+    b = (rgb565 & 0x1F) << 3;
+}
+
+// Función para procesar el buffer de comandos de dibujo
+void processDrawingBuffer() {
+    if (drawCommandCount == 0) return;
+    
+    // Reiniciar dirty rectangle
+    dirtyMinX = PANEL_RES_X;
+    dirtyMaxX = -1;
+    dirtyMinY = PANEL_RES_Y;
+    dirtyMaxY = -1;
+    
+    // Procesar todos los comandos pendientes
+    for (int i = 0; i < drawCommandCount; i++) {
+        DrawCommand &cmd = drawCommandBuffer[i];
+        
+        // Dibujar píxeles según el tamaño del pincel
+        int halfSize = (cmd.size - 1) / 2;
+        for (int dy = -halfSize; dy <= halfSize + (cmd.size - 1) % 2; dy++) {
+            for (int dx = -halfSize; dx <= halfSize + (cmd.size - 1) % 2; dx++) {
+                int px = cmd.x + dx;
+                int py = cmd.y + dy;
+                
+                if (px >= 0 && px < PANEL_RES_X && py >= 0 && py < PANEL_RES_Y) {
+                    drawingBuffer[py][px] = cmd.color;
+                    
+                    // Actualizar dirty rectangle
+                    if (px < dirtyMinX) dirtyMinX = px;
+                    if (px > dirtyMaxX) dirtyMaxX = px;
+                    if (py < dirtyMinY) dirtyMinY = py;
+                    if (py > dirtyMaxY) dirtyMaxY = py;
+                }
+            }
+        }
+    }
+    
+    // Solo actualizar la región modificada
+    if (dirtyMaxX >= 0) {
+        for (int y = dirtyMinY; y <= dirtyMaxY; y++) {
+            for (int x = dirtyMinX; x <= dirtyMaxX; x++) {
+                dma_display->drawPixel(x, y, drawingBuffer[y][x]);
+            }
+        }
+    }
+    
+    // Limpiar el buffer
+    drawCommandCount = 0;
+    lastDrawingUpdate = millis();
+}
+
+// Función para agregar comando al buffer
+void addDrawCommand(int x, int y, uint16_t color, int size) {
+    if (drawCommandCount < MAX_DRAW_COMMANDS) {
+        drawCommandBuffer[drawCommandCount].x = x;
+        drawCommandBuffer[drawCommandCount].y = y;
+        drawCommandBuffer[drawCommandCount].color = color;
+        drawCommandBuffer[drawCommandCount].size = size;
+        drawCommandCount++;
+    }
+}
+
+// ===== FIN FUNCIONES DE DIBUJO =====
 
 // Función para mostrar el icono de WiFi parpadeando (ya existente)
 void showWiFiIcon(int n)
@@ -680,6 +878,12 @@ void showCheckMessage()
 
 void checkForUpdates()
 {
+    // En modo DEV, no comprobar actualizaciones
+    if (DEV) {
+        Serial.println("Modo DEV activo - saltando comprobación de actualizaciones");
+        return;
+    }
+    
     // Asegurar que el tiempo esté sincronizado antes de la actualización
     timeClient.update();
     time_t now = timeClient.getEpochTime();
@@ -926,8 +1130,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             }
             else if (strcmp(action, "update_bin") == 0)
             {
-                Serial.println("Se recibio una actualizacion de binario por MQTT");
-                checkForUpdates();
+                if (DEV) {
+                    Serial.println("Comando de actualización recibido por MQTT - ignorado en modo DEV");
+                } else {
+                    Serial.println("Se recibio una actualizacion de binario por MQTT");
+                    checkForUpdates();
+                }
             }
             else if (strcmp(action, "factory_reset") == 0)
             {
@@ -938,6 +1146,68 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 preferences.clear();
                 ESP.restart();
             }
+            // ===== HANDLERS DE DIBUJO =====
+            else if (strcmp(action, "enter_draw_mode") == 0)
+            {
+                Serial.println("Entrando en modo dibujo via MQTT");
+                enterDrawingMode();
+            }
+            else if (strcmp(action, "exit_draw_mode") == 0)
+            {
+                Serial.println("Saliendo del modo dibujo via MQTT");
+                exitDrawingMode();
+            }
+            else if (strcmp(action, "draw_pixel") == 0)
+            {
+                // Auto-entrar en modo dibujo si no está activo
+                if (!drawingMode) {
+                    Serial.println("Auto-activando modo dibujo para draw_pixel");
+                    enterDrawingMode();
+                }
+                
+                int x = doc["x"];
+                int y = doc["y"];
+                const char* colorHex = doc["color"];
+                int size = doc["size"] | 1; // Default to 1 if not provided
+                
+                // Convert hex color to RGB565 (with BGR correction)
+                uint16_t color = 0;
+                if (colorHex && strlen(colorHex) == 7 && colorHex[0] == '#') {
+                    uint32_t rgb = strtol(colorHex + 1, NULL, 16);
+                    uint8_t r = (rgb >> 16) & 0xFF;
+                    uint8_t g = (rgb >> 8) & 0xFF;
+                    uint8_t b = rgb & 0xFF;
+                    // Swap channels: RGB -> BGR
+                    color = dma_display->color565(b, r, g);
+                }
+                // Agregar comando al buffer en lugar de dibujar inmediatamente
+                addDrawCommand(x, y, color, size);
+            }
+            else if (strcmp(action, "draw_stroke") == 0)
+            {
+                // Auto-entrar en modo dibujo si no está activo
+                if (!drawingMode) {
+                    enterDrawingMode();
+                }
+                
+                JsonArray points = doc["points"];
+                uint16_t color = doc["color"];
+                
+                drawDrawingStroke(points, color);
+                // No llamar a updateDrawingDisplay aquí - será manejado por el buffer
+            }
+            else if (strcmp(action, "clear_canvas") == 0)
+            {
+                // Auto-entrar en modo dibujo si no está activo
+                if (!drawingMode) {
+                    Serial.println("Auto-activando modo dibujo para clear_canvas");
+                    enterDrawingMode();
+                }
+                
+                clearDrawingCanvas();
+                // No necesitamos updateDrawingDisplay - clearDrawingCanvas ya limpia la pantalla
+            }
+            // ===== FIN HANDLERS DE DIBUJO =====
         }
     }
 }
@@ -1387,6 +1657,25 @@ void checkActivation() {
 void setup()
 {
     Serial.begin(115200);
+    
+    // Mostrar información del modo de desarrollo
+    if (DEV) {
+        Serial.println("==========================================");
+        Serial.println("           MODO DESARROLLO ACTIVO        ");
+        Serial.println("==========================================");
+        Serial.println("- Servidor: " + String(serverUrl));
+        Serial.println("- Actualizaciones OTA: DESHABILITADAS");
+        Serial.println("- Seguridad TLS: DESHABILITADA");
+        Serial.println("==========================================");
+    } else {
+        Serial.println("==========================================");
+        Serial.println("           MODO PRODUCCIÓN ACTIVO        ");
+        Serial.println("==========================================");
+        Serial.println("- Servidor: " + String(serverUrl));
+        Serial.println("- Actualizaciones OTA: HABILITADAS");
+        Serial.println("- Seguridad TLS: HABILITADA");
+        Serial.println("==========================================");
+    }
 
     // Configuración del panel
     HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
@@ -1456,6 +1745,7 @@ void setup()
         else
             type = "filesystem";
         Serial.println("Inicio de actualización OTA: " + type);
+        dma_display->clearScreen();
     });
     ArduinoOTA.onEnd([]() {
         Serial.println("\nActualización OTA completada.");
@@ -1484,7 +1774,12 @@ void setup()
     timeClient.update();
 
     // Check for updates
-    checkForUpdates();
+    // Comprobar actualizaciones solo si no estamos en modo DEV
+    if (!DEV) {
+        checkForUpdates();
+    } else {
+        Serial.println("Modo DEV activo - saltando comprobación inicial de actualizaciones");
+    }
 
     // Register Pixie if not registered
     if (pixieId == 0) {
@@ -1525,6 +1820,21 @@ void loop()
         mqttClient.loop();
     }    
 
+    // Verificar timeout del modo dibujo
+    checkDrawingTimeout();
+
+    // Si estamos en modo dibujo, no ejecutar la lógica de fotos
+    if (drawingMode) {
+        // Procesar buffer de comandos si ha pasado suficiente tiempo
+        if (millis() - lastDrawingUpdate >= DRAWING_UPDATE_INTERVAL) {
+            processDrawingBuffer();
+        }
+        
+        ArduinoOTA.handle();
+        delay(10);
+        return;
+    }
+
     // Si estamos conectados a WiFi, se ejecuta la lógica original:
     if (allowSpotify) {
         if (millis() - lastSpotifyCheck >= timeToCheckSpotify) {
@@ -1556,5 +1866,5 @@ void loop()
             }
         }
     }
-    wait(1000);
+    wait(100); // Reducido de 1000ms a 100ms para mejor respuesta
 }
