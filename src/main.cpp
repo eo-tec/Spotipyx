@@ -929,6 +929,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 Serial.println("Se recibio una actualizacion de binario por MQTT");
                 checkForUpdates();
             }
+            else if (strcmp(action, "factory_reset") == 0)
+            {
+                Serial.println("Factory reset recibido via MQTT");
+                dma_display->clearScreen();
+                showLoadingMsg("Factory Reset...");
+                delay(2000);
+                preferences.clear();
+                ESP.restart();
+            }
         }
     }
 }
