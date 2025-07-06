@@ -66,6 +66,20 @@ unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
 String activationCode = "0000";
 
+// Variables para el scroll del título
+String currentTitle = "";
+String currentName = "";
+int titleScrollOffset = 0;
+unsigned long lastTitleScrollTime = 0;
+unsigned long titleScrollSpeed = 300; // Velocidad del scroll en ms
+unsigned long titleScrollPauseTime = 2000; // Pausa al inicio y al final
+unsigned long titleScrollPauseStart = 0;
+enum ScrollState { SCROLL_PAUSED_START, SCROLL_SCROLLING, SCROLL_PAUSED_END, SCROLL_RETURNING };
+ScrollState titleScrollState = SCROLL_PAUSED_START;
+bool titleNeedsScroll = false;
+int titleY = 0;
+int nameY = 0;
+
 // Variables para el modo de dibujo
 bool drawingMode = false;
 uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer separado para dibujo
@@ -609,37 +623,217 @@ void getPixie()
     delete client;
 }
 
+// Función para actualizar el scroll del título
+void updatePhotoInfo() {
+    if (!titleNeedsScroll || currentTitle.length() == 0) {
+        return;
+    }
+    
+    unsigned long currentTime = millis();
+    
+    switch (titleScrollState) {
+        case SCROLL_PAUSED_START:
+            if (currentTime - titleScrollPauseStart >= titleScrollPauseTime) {
+                titleScrollState = SCROLL_SCROLLING;
+                lastTitleScrollTime = currentTime;
+            }
+            break;
+            
+        case SCROLL_SCROLLING:
+            if (currentTime - lastTitleScrollTime >= titleScrollSpeed) {
+                // Incrementar el offset para quitar un carácter más del inicio
+                titleScrollOffset++;
+                
+                // Obtener el substring del título
+                String scrolledTitle = currentTitle.substring(titleScrollOffset);
+                
+                // Medir el ancho del texto actual
+                dma_display->setFont(&Picopixel);
+                dma_display->setTextSize(1);
+                int16_t x1, y1;
+                uint16_t w, h;
+                dma_display->getTextBounds(scrolledTitle, 0, 0, &x1, &y1, &w, &h);
+                
+                // Limpiar el área del título
+                dma_display->fillRect(0, titleY - h - 1, PANEL_RES_X, h + 2, myBLACK);
+                
+                // Dibujar el título con scroll
+                dma_display->setTextColor(myWHITE);
+                dma_display->setCursor(1, titleY);
+                dma_display->print(scrolledTitle);
+                
+                // Si el título ahora cabe completamente, pausar
+                if (w <= PANEL_RES_X - 2) {
+                    titleScrollState = SCROLL_PAUSED_END;
+                    titleScrollPauseStart = currentTime;
+                }
+                
+                lastTitleScrollTime = currentTime;
+            }
+            break;
+            
+        case SCROLL_PAUSED_END:
+            if (currentTime - titleScrollPauseStart >= titleScrollPauseTime) {
+                // Cambiar a estado de retorno
+                titleScrollState = SCROLL_RETURNING;
+                lastTitleScrollTime = currentTime;
+            }
+            break;
+            
+        case SCROLL_RETURNING:
+            if (currentTime - lastTitleScrollTime >= titleScrollSpeed) {
+                // Decrementar el offset para añadir letras al principio
+                if (titleScrollOffset > 0) {
+                    titleScrollOffset--;
+                    
+                    // Obtener el substring del título
+                    String scrolledTitle = currentTitle.substring(titleScrollOffset);
+                    
+                    // Medir el ancho del texto actual
+                    dma_display->setFont(&Picopixel);
+                    dma_display->setTextSize(1);
+                    int16_t x1, y1;
+                    uint16_t w, h;
+                    dma_display->getTextBounds(scrolledTitle, 0, 0, &x1, &y1, &w, &h);
+                    
+                    // Limpiar el área del título
+                    dma_display->fillRect(0, titleY - h - 1, PANEL_RES_X, h + 2, myBLACK);
+                    
+                    // Dibujar el título con scroll
+                    dma_display->setTextColor(myWHITE);
+                    dma_display->setCursor(1, titleY);
+                    dma_display->print(scrolledTitle);
+                    
+                    lastTitleScrollTime = currentTime;
+                } else {
+                    // Hemos vuelto al principio, cambiar a pausa inicial
+                    titleScrollState = SCROLL_PAUSED_START;
+                    titleScrollPauseStart = currentTime;
+                }
+            }
+            break;
+    }
+}
+
 void showPhotoInfo(String title, String name)
 {
-    // Mostrar título en la parte inferior izquierda
     dma_display->setFont(&Picopixel);
     dma_display->setTextSize(1);
     dma_display->setTextColor(myWHITE);
-    int16_t x1, y1;
-    uint16_t w, h;
-    if (title.length() > 0)
-    {
-        dma_display->getTextBounds(title, 0, PANEL_RES_Y - 2, &x1, &y1, &w, &h);
-        dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK);
-        dma_display->setCursor(1, PANEL_RES_Y - 2);
-        dma_display->print(title);
-    }
+    
+    // Calcular las dimensiones reales de ambos textos primero
+    int16_t titleX1, titleY1, nameX1, nameY1;
+    uint16_t titleW = 0, titleH = 0, nameW = 0, nameH = 0;
 
-    if (name.length() > 0)
-    {
-        // Mostrar nombre en la parte inferior derecha (o en otra posición según ancho)
-        if (w + name.length() * 3 > PANEL_RES_X && title.length() > 0)
-        {
-            dma_display->getTextBounds(name, 0, PANEL_RES_Y - 10, &x1, &y1, &w, &h);
-            dma_display->fillRect(x1 - 1, y1 - 1, w + 3, h + 2, myBLACK);
-            dma_display->setCursor(1, PANEL_RES_Y - 10);
+    dma_display->setTextWrap(false);
+    
+    if (title.length() > 0) {
+        dma_display->getTextBounds(title, 0, 0, &titleX1, &titleY1, &titleW, &titleH);
+    }
+    
+    if (name.length() > 0) {
+        dma_display->getTextBounds(name, 0, 0, &nameX1, &nameY1, &nameW, &nameH);
+    }
+    Serial.println("titleW: " + String(titleW) + " title: " + title);
+    
+    // Guardar el título y nombre actuales
+    currentTitle = title;
+    currentName = name;
+    
+    // Margen entre textos cuando están en la misma línea
+    const int horizontalMargin = 4;
+    
+    // Decidir el layout basado en los anchos reales
+    bool sameLine = false;
+    if (title.length() > 0 && name.length() > 0) {
+        // Verificar si ambos textos caben en la misma línea con margen
+        sameLine = (titleW + nameW + horizontalMargin) <= PANEL_RES_X;
+    } else {
+        // Si solo hay uno de los dos textos, siempre va en una línea
+        sameLine = true;
+    }
+    
+    if (sameLine) {
+        // Ambos textos en la misma línea (inferior)
+        titleY = PANEL_RES_Y - 2;
+        nameY = PANEL_RES_Y - 2;
+        
+        if (title.length() > 0) {
+            // Verificar si el título necesita scroll
+            if (titleW > PANEL_RES_X - 2) {
+                // Activar scroll
+                titleNeedsScroll = true;
+                titleScrollOffset = 0;
+                titleScrollState = SCROLL_PAUSED_START;
+                titleScrollPauseStart = millis();
+                
+                // Dibujar el título completo inicialmente
+                dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
+                dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
+                dma_display->setCursor(1, titleY);
+                dma_display->print(title);
+            } else {
+                // El título cabe, dibujarlo normalmente
+                titleNeedsScroll = false;
+                dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
+                dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
+                dma_display->setCursor(1, titleY);
+                dma_display->print(title);
+            }
+        }
+        
+        if (name.length() > 0) {
+            // Calcular posición X para alinear a la derecha
+            int nameX = PANEL_RES_X - nameW;
+            dma_display->getTextBounds(name, nameX, nameY, &nameX1, &nameY1, &nameW, &nameH);
+            dma_display->fillRect(nameX - 1, nameY1 - 1, nameW + 2, nameH + 2, myBLACK);
+            dma_display->setCursor(nameX, nameY);
             dma_display->print(name);
         }
-        else
-        {
-            dma_display->getTextBounds(name, 0, PANEL_RES_Y - 2, &x1, &y1, &w, &h);
-            dma_display->fillRect(PANEL_RES_X - w - 1, y1 - 1, w + 2, h + 2, myBLACK);
-            dma_display->setCursor(PANEL_RES_X - w, PANEL_RES_Y - 2);
+    } else {
+        // Textos en líneas diferentes
+        // Calcular las posiciones Y para evitar solapamiento
+        int bottomY = PANEL_RES_Y - 2;
+        int topY = bottomY - titleH - 3; // 3 píxeles de separación entre líneas
+        
+        // Asegurar que el texto superior no esté demasiado arriba
+        if (topY < PANEL_RES_Y - 12) {
+            topY = PANEL_RES_Y - 12;
+        }
+        
+        titleY = bottomY;
+        nameY = topY;
+        
+        // Título en la línea inferior
+        if (title.length() > 0) {
+            // Verificar si el título necesita scroll
+            if (titleW > PANEL_RES_X - 2) {
+                // Activar scroll
+                titleNeedsScroll = true;
+                titleScrollOffset = 0;
+                titleScrollState = SCROLL_PAUSED_START;
+                titleScrollPauseStart = millis();
+                
+                // Dibujar el título completo inicialmente
+                dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
+                dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
+                dma_display->setCursor(1, titleY);
+                dma_display->print(title);
+            } else {
+                // El título cabe, dibujarlo normalmente
+                titleNeedsScroll = false;
+                dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
+                dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
+                dma_display->setCursor(1, titleY);
+                dma_display->print(title);
+            }
+        }
+        
+        // Nombre en la línea superior
+        if (name.length() > 0) {
+            dma_display->getTextBounds(name, 1, nameY, &nameX1, &nameY1, &nameW, &nameH);
+            dma_display->fillRect(0, nameY1 - 1, nameW + 3, nameH + 2, myBLACK);
+            dma_display->setCursor(1, nameY);
             dma_display->print(name);
         }
     }
@@ -681,6 +875,9 @@ void showPhoto(String url)
 
     fadeOut();
     dma_display->clearScreen();
+    
+    // Resetear el estado del scroll del título anterior
+    titleNeedsScroll = false;
 
     const int bytesPerLine = 64 * 3;
     uint8_t lineBuffer[bytesPerLine];
@@ -747,6 +944,9 @@ void showPhotoFromCenter(const String &url)
         username[i] = stream->read();
     title[titleLen] = '\0';
     username[usernameLen] = '\0';
+    
+    // Resetear el estado del scroll del título anterior
+    titleNeedsScroll = false;
 
     // 🟥 ANIMACIÓN DE CUADRADOS DE COLORES
     int centerX = 32;
@@ -1746,6 +1946,7 @@ void setup()
             type = "filesystem";
         Serial.println("Inicio de actualización OTA: " + type);
         dma_display->clearScreen();
+        showPercetage(0);
     });
     ArduinoOTA.onEnd([]() {
         Serial.println("\nActualización OTA completada.");
@@ -1866,5 +2067,9 @@ void loop()
             }
         }
     }
+    
+    // Actualizar el scroll del título si es necesario
+    updatePhotoInfo();
+    
     wait(100); // Reducido de 1000ms a 100ms para mejor respuesta
 }
