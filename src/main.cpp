@@ -53,7 +53,7 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = true;
+const bool DEV = false;
 const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
@@ -652,10 +652,10 @@ void updatePhotoInfo() {
                 dma_display->setTextSize(1);
                 int16_t x1, y1;
                 uint16_t w, h;
-                dma_display->getTextBounds(scrolledTitle, 0, 0, &x1, &y1, &w, &h);
+                dma_display->getTextBounds(scrolledTitle, 1, titleY, &x1, &y1, &w, &h);
                 
                 // Limpiar el área del título
-                dma_display->fillRect(0, titleY - h - 1, PANEL_RES_X, h + 2, myBLACK);
+                dma_display->fillRect(0, y1 - 1, PANEL_RES_X, h + 2, myBLACK);
                 
                 // Dibujar el título con scroll
                 dma_display->setTextColor(myWHITE);
@@ -694,10 +694,10 @@ void updatePhotoInfo() {
                     dma_display->setTextSize(1);
                     int16_t x1, y1;
                     uint16_t w, h;
-                    dma_display->getTextBounds(scrolledTitle, 0, 0, &x1, &y1, &w, &h);
+                    dma_display->getTextBounds(scrolledTitle, 1, titleY, &x1, &y1, &w, &h);
                     
                     // Limpiar el área del título
-                    dma_display->fillRect(0, titleY - h - 1, PANEL_RES_X, h + 2, myBLACK);
+                    dma_display->fillRect(0, y1 - 1, PANEL_RES_X, h + 2, myBLACK);
                     
                     // Dibujar el título con scroll
                     dma_display->setTextColor(myWHITE);
