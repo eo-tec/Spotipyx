@@ -84,7 +84,7 @@ int nameY = 0;
 bool drawingMode = false;
 uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer separado para dibujo
 unsigned long lastDrawingActivity = 0;
-const unsigned long DRAWING_TIMEOUT = 300000; // 5 minutos sin actividad
+const unsigned long DRAWING_TIMEOUT = 60000; // 1 minuto sin actividad
 
 // Buffer de comandos de dibujo
 struct DrawCommand {
