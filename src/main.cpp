@@ -54,7 +54,7 @@ int pixieId = 0;
 int photoIndex = 0;
 
 const bool DEV = false;
-const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
+const char *serverUrl = DEV ? "http://192.168.6.233:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -442,33 +442,68 @@ void fetchAndDrawCover()
     HTTPClient http;
 
     Serial.println("Conectando al servidor...");
-    http.begin(*client, String(serverUrl) + "public/spotify/" + "cover-64x64?pixie_id=" + String(pixieId));
+    // Cambiar endpoint para recibir datos binarios
+    http.begin(*client, String(serverUrl) + "public/spotify/" + "cover-64x64-binary?pixie_id=" + String(pixieId));
     int httpCode = http.GET();
 
     if (httpCode == 200)
     {
-        JsonDocument doc;
-        delay(250);                      // Puede ayudar
-        DeserializationError error = deserializeJson(doc, http.getStream());
-        if (error)
+        WiFiClient *stream = http.getStreamPtr();
+        
+        // No limpiar pantalla para evitar parpadeo negro
+        
+        // Leer toda la imagen primero en un buffer temporal
+        const int totalBytes = 64 * 64 * 2; // 64x64 píxeles * 2 bytes (RGB565)
+        uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
+        
+        if (!imageBuffer)
         {
-            Serial.print("Error al parsear JSON: ");
-            Serial.println(error.c_str());
-            showTime();
+            Serial.println("Error: no hay suficiente memoria para cargar la imagen.");
             http.end();
             delay(50);
             delete client;
             return;
         }
-        JsonArray data = doc["data"].as<JsonArray>();
-        int width = doc["width"];
-        int height = doc["height"];
-
-        // Animación "push up" antes de mostrar la nueva portada
-        for (int y = 0; y < height; y++)
+        
+        size_t totalReceived = stream->readBytes(imageBuffer, totalBytes);
+        
+        if (totalReceived != totalBytes)
         {
-            pushUpAnimation(y, data);
+            Serial.printf("Error: esperados %d bytes pero recibidos %d\n", totalBytes, totalReceived);
+            free(imageBuffer);
+            http.end();
+            delay(50);
+            delete client;
+            return;
         }
+        
+        // Mostrar la imagen con animación push up
+        for (int y = 0; y < 64; y++)
+        {
+            // Mover todas las líneas existentes hacia arriba
+            for (int moveY = 0; moveY < 63; moveY++)
+            {
+                for (int x = 0; x < 64; x++)
+                {
+                    uint16_t color = screenBuffer[moveY + 1][x];
+                    drawPixelWithBuffer(x, moveY, color);
+                    screenBuffer[moveY][x] = color;
+                }
+            }
+            
+            // Dibujar la nueva línea en la parte inferior (línea 63)
+            for (int x = 0; x < 64; x++)
+            {
+                int bufferIdx = (y * 64 + x) * 2;
+                uint16_t color = (imageBuffer[bufferIdx] << 8) | imageBuffer[bufferIdx + 1];
+                drawPixelWithBuffer(x, 63, color);
+                screenBuffer[63][x] = color;
+            }
+            
+            delay(15); // Velocidad de la animación (más lenta)
+        }
+        
+        free(imageBuffer);
     }
     else
     {
@@ -1284,11 +1319,11 @@ void showAPCredentials(const char *ssid, const char *password)
     // Mostrar SSID
     dma_display->setFont(&Picopixel);
     dma_display->setCursor(1, 10);
-    dma_display->print("Connect to:");
+    dma_display->print("Connect to WiFi:");
     dma_display->setCursor(1, 20);
-    dma_display->print("SSID: Pixie");
+    dma_display->print(String(ssid));
     dma_display->setCursor(1, 30);
-    dma_display->print("Pass: 12345678");
+    dma_display->print("Pass: " + String(password));
 
     // Mostrar contraseña
     dma_display->setCursor(1, 45);
@@ -2006,7 +2041,7 @@ void loop()
         // Refrescar la pantalla cada 5 segundos para mantener visible la información
         static unsigned long lastRefresh = 0;
         if (millis() - lastRefresh > 5000) {
-            showAPCredentials("Pixie", "12345678");
+            showAPCredentials("MinimalFrame", "12345678");
             lastRefresh = millis();
         }
         
