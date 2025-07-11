@@ -1780,14 +1780,14 @@ void setupWebServer() {
 void startAPMode() {
     apMode = true;
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("Pixie", "12345678");
+    WiFi.softAP("MinimalFrame", "12345678");
     
     IPAddress IP = WiFi.softAPIP();
     Serial.print("AP IP address: ");
     Serial.println(IP);
     
     setupWebServer();
-    showAPCredentials("Pixie", "12345678");
+    showAPCredentials("MinimalFrame", "12345678");
 }
 
 // Función para procesar las credenciales recibidas por Serial
