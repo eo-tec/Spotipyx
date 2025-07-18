@@ -525,30 +525,28 @@ String fetchSongId()
 
     if (httpCode == 200)
     {
-        JsonDocument doc;
-        delay(250);                    // Puede ayudar
-        DeserializationError error = deserializeJson(doc, http.getStream());
-        if (!error)
-        {
-            String songId = doc["id"].as<String>();
-            http.end();
-            delay(50);
-            delete client;
-            if (songId == "" || songId == "null")
-            {
-                Serial.println("No hay canción en reproducción.");
+        // Usar un buffer estático más pequeño y parseo manual
+        String response = http.getString();
+        http.end();
+        delay(50);
+        delete client;
+        
+        // Parseo manual simple para extraer el id
+        int idIndex = response.indexOf("\"id\":\"");
+        if (idIndex != -1) {
+            idIndex += 6; // Mover más allá de "id":"
+            int endIndex = response.indexOf("\"", idIndex);
+            if (endIndex != -1) {
+                String songId = response.substring(idIndex, endIndex);
+                if (songId.length() > 0) {
+                    Serial.printf("ID de la canción en reproducción: %s\n", songId.c_str());
+                    return songId;
+                }
             }
-            else
-            {
-                Serial.printf("ID de la canción en reproducción: %s\n", songId.c_str());
-            }
-            return songId;
         }
-        else
-        {
-            Serial.print("Error al parsear JSON: ");
-            Serial.println(error.c_str());
-        }
+        
+        Serial.println("No hay canción en reproducción.");
+        return "";
     }
     else
     {
