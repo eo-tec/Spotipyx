@@ -14,14 +14,14 @@
 #include <PubSubClient.h>
 
 // Configuración MQTT
-const char *MQTT_BROKER_URL = "c9df3292c56a47f08840ec694f893966.s1.eu.hivemq.cloud";
-const int MQTT_BROKER_PORT = 8883;
+const char *MQTT_BROKER_URL = "mqtt.mypixelframe.com";
+const int MQTT_BROKER_PORT = 1883;
 const char *MQTT_BROKER_USERNAME = "server";
 const char *MQTT_BROKER_PASSWORD = "Test1234!";
 const char *MQTT_CLIENT_ID = "pixie-"; // Se completará con el ID del pixie
 
-WiFiClientSecure espClient;
-PubSubClient mqttClient(espClient);
+WiFiClient mqttClientWiFi;
+PubSubClient mqttClient(mqttClientWiFi);
 
 // Pines del panel
 #define E_PIN 18
@@ -54,7 +54,7 @@ int pixieId = 0;
 int photoIndex = 0;
 
 const bool DEV = false;
-const char *serverUrl = DEV ? "http://192.168.6.233:3000/" : "https://api.mypixelframe.com/";
+const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -504,6 +504,9 @@ void fetchAndDrawCover()
         }
         
         free(imageBuffer);
+        
+        // Limpiar mensaje de carga después de mostrar la portada
+        loadingMsg = "";
     }
     else
     {
@@ -1450,22 +1453,48 @@ void mqttReconnect()
 {
     while (!mqttClient.connected())
     {
-        Serial.print("Intentando conexión MQTT...");
+        Serial.print("Intentando conexión MQTT a ");
+        Serial.print(MQTT_BROKER_URL);
+        Serial.print(":");
+        Serial.print(MQTT_BROKER_PORT);
+        Serial.print("...");
+        
         String clientId = String(MQTT_CLIENT_ID) + String(pixieId);
+        Serial.print(" con cliente ID: ");
+        Serial.println(clientId);
 
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
         {
-            Serial.println("conectado");
+            Serial.println("MQTT conectado exitosamente!");
             // Suscribirse al tema específico del pixie
             String topic = String("pixie/") + String(pixieId);
             Serial.println("Suscribiendo al tema: " + topic);
-            mqttClient.subscribe(topic.c_str());
+            if (mqttClient.subscribe(topic.c_str())) {
+                Serial.println("Suscripción exitosa");
+                // Limpiar mensaje de conexión después de conectar exitosamente
+                loadingMsg = "";
+            } else {
+                Serial.println("Error en la suscripción");
+            }
         }
         else
         {
-            Serial.print("falló, rc=");
+            Serial.print("MQTT falló, rc=");
             Serial.print(mqttClient.state());
-            Serial.println(" reintentando en 5 segundos");
+            Serial.print(" (");
+            switch(mqttClient.state()) {
+                case -4: Serial.print("MQTT_CONNECTION_TIMEOUT"); break;
+                case -3: Serial.print("MQTT_CONNECTION_LOST"); break;
+                case -2: Serial.print("MQTT_CONNECT_FAILED"); break;
+                case -1: Serial.print("MQTT_DISCONNECTED"); break;
+                case 0: Serial.print("MQTT_CONNECTED"); break;
+                case 1: Serial.print("MQTT_CONNECT_BAD_PROTOCOL"); break;
+                case 2: Serial.print("MQTT_CONNECT_BAD_CLIENT_ID"); break;
+                case 3: Serial.print("MQTT_CONNECT_UNAVAILABLE"); break;
+                case 4: Serial.print("MQTT_CONNECT_BAD_CREDENTIALS"); break;
+                case 5: Serial.print("MQTT_CONNECT_UNAUTHORIZED"); break;
+            }
+            Serial.println(") reintentando en 5 segundos");
             delay(5000);
         }
     }
@@ -1961,12 +1990,11 @@ void setup()
         Serial.println("OK");
         showLoadingMsg("Connected to WiFi");
 
-        // Configurar cliente WiFi seguro para MQTT
-        espClient.setInsecure();
-
-        // Configuración de MQTT
+        // Configuración de MQTT (sin TLS para puerto 1883)
         mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
         mqttClient.setCallback(mqttCallback);
+        mqttClient.setKeepAlive(60);  // Keep-alive de 60 segundos
+        mqttClient.setBufferSize(512); // Aumentar buffer para mensajes más grandes
     }
 
     // Configuración de OTA
@@ -2025,6 +2053,10 @@ void setup()
     // Verificar estado de activación
     checkActivation();
 
+    // Conectar a MQTT
+    showLoadingMsg("Connecting server");
+    mqttReconnect();
+    
     showLoadingMsg("Ready!");
 }
 
