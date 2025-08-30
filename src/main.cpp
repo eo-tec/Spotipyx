@@ -56,6 +56,9 @@ int photoIndex = 0;
 const bool DEV = false;
 const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
 
+// Variable para controlar el reset automático al arrancar
+const bool AUTO_RESET_ON_STARTUP = false; // Cambiar a false para deshabilitar el reset automático
+
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
@@ -1382,6 +1385,44 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 preferences.clear();
                 ESP.restart();
             }
+            else if (strcmp(action, "reset_env_vars") == 0)
+            {
+                Serial.println("Reset de variables de entorno recibido via MQTT");
+                dma_display->clearScreen();
+                showLoadingMsg("Resetting Env Vars...");
+                delay(1000);
+                
+                // Resetear variables de entorno sin reiniciar el dispositivo
+                preferences.begin("wifi", false);
+                preferences.clear();
+                preferences.end();
+                
+                // Reinicializar con valores por defecto
+                preferences.begin("wifi", false);
+                preferences.putInt("currentVersion", 0);
+                preferences.putInt("pixieId", 0);
+                preferences.putInt("brightness", 50);
+                preferences.putInt("maxPhotos", 5);
+                preferences.putUInt("secsPhotos", 30000);
+                preferences.putString("ssid", "");
+                preferences.putString("password", "");
+                preferences.putBool("allowSpotify", false);
+                preferences.putString("code", "0000");
+                preferences.end();
+                
+                // Resetear variables globales
+                brightness = 50;
+                maxPhotos = 5;
+                secsPhotos = 30000;
+                allowSpotify = false;
+                activationCode = "0000";
+                currentVersion = 0;
+                pixieId = 0;
+                
+                showLoadingMsg("Env Vars Reset!");
+                delay(2000);
+                dma_display->clearScreen();
+            }
             // ===== HANDLERS DE DIBUJO =====
             else if (strcmp(action, "enter_draw_mode") == 0)
             {
@@ -1628,6 +1669,8 @@ button:hover{background:#45a049}
 </form>
 <div class="form-group">
 <a href="/reset"><button type="button" class="scan-btn">Reset Device</button></a>
+<a href="/reset_env"><button type="button" class="scan-btn">Reset Env Vars</button></a>
+<a href="/status"><button type="button" class="scan-btn">Connection Status</button></a>
 </div>
 </div>
 </body>
@@ -1785,6 +1828,60 @@ h1{color:#333}
     ESP.restart();
 }
 
+// Función para manejar el reset de variables de entorno
+void handleEnvVarsReset() {
+    String html = R"(<!DOCTYPE html>
+<html>
+<head>
+<title>Reset Env Vars - Pixie</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
+.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
+h1{color:#333}
+.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold;background:#d4edda;color:#155724}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Environment Variables Reset</h1>
+<div class="status">Environment variables reset successfully!</div>
+<p>Device will continue running with default values.</p>
+<a href="/" style="color:#007bff;text-decoration:none;padding:10px;background:#f8f9fa;border-radius:5px;display:inline-block;margin-top:20px">Back to Main</a>
+</div>
+</body>
+</html>)";
+    
+    webServer.send(200, "text/html", html);
+    
+    // Resetear variables de entorno
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+    
+    // Reinicializar con valores por defecto
+    preferences.begin("wifi", false);
+    preferences.putInt("currentVersion", 0);
+    preferences.putInt("pixieId", 0);
+    preferences.putInt("brightness", 50);
+    preferences.putInt("maxPhotos", 5);
+    preferences.putUInt("secsPhotos", 30000);
+    preferences.putString("ssid", "");
+    preferences.putString("password", "");
+    preferences.putBool("allowSpotify", false);
+    preferences.putString("code", "0000");
+    preferences.end();
+    
+    // Resetear variables globales
+    brightness = 50;
+    maxPhotos = 5;
+    secsPhotos = 30000;
+    allowSpotify = false;
+    activationCode = "0000";
+    currentVersion = 0;
+    pixieId = 0;
+}
+
 // Función para manejar el status de conexión
 void handleConnectionStatus() {
     String html = R"(<!DOCTYPE html>
@@ -1832,6 +1929,7 @@ void setupWebServer() {
     webServer.on("/scan", HTTP_GET, handleWifiScan);
     webServer.on("/connect", HTTP_POST, handleWifiConnect);
     webServer.on("/reset", HTTP_GET, handleDeviceReset);
+    webServer.on("/reset_env", HTTP_GET, handleEnvVarsReset);
     webServer.on("/status", HTTP_GET, handleConnectionStatus);
     
     webServer.begin();
@@ -1881,19 +1979,43 @@ void showActivationCode(String code) {
     dma_display->setTextColor(myWHITE);
     dma_display->setFont(&Picopixel);
     
-    // Mostrar "Activation code:"
-    dma_display->setCursor(6, 10);
-    dma_display->print("Activation code:");
-    
-    // Mostrar el código
-    dma_display->setFont(&FreeSans12pt7b);
+    // Mostrar "Activation code:" centrado
     int16_t x1, y1;
     uint16_t w, h;
-    dma_display->getTextBounds(code, 0, 55, &x1, &y1, &w, &h);
-    int16_t centeredX = (PANEL_RES_X - w) / 2;
-    dma_display->setCursor(centeredX, 40);
+    const char* label = "Activation code:";
+    dma_display->getTextBounds(label, 0, 0, &x1, &y1, &w, &h);
+    int16_t labelX = (PANEL_RES_X - w) / 2;
+    dma_display->setCursor(labelX, 20);
+    dma_display->print(label);
+    
+    // Mostrar el código con fuente más pequeña
+    dma_display->setFont();  // Usar fuente por defecto (más pequeña)
+    dma_display->setTextSize(2);  // Tamaño 2 para que sea visible pero no muy grande
+    
+    // Obtener el ancho del código con tamaño 2
+    dma_display->getTextBounds(code, 0, 0, &x1, &y1, &w, &h);
+    
+    // Si el código es muy ancho, reducir el tamaño
+    if (w > PANEL_RES_X - 4) {  // Dejar 2 píxeles de margen a cada lado
+        dma_display->setTextSize(1);
+        dma_display->getTextBounds(code, 0, 0, &x1, &y1, &w, &h);
+    }
+    
+    // Calcular posición X centrada
+    int16_t codeX = (PANEL_RES_X - w) / 2;
+    
+    // Asegurar que nunca sea negativo (por si acaso)
+    if (codeX < 0) codeX = 0;
+    
+    // Posición Y para el código
+    int16_t codeY = 40;
+    
+    dma_display->setCursor(codeX, codeY);
     dma_display->print(code);
+    
+    // Restaurar configuración de fuente
     dma_display->setFont(&Picopixel);
+    dma_display->setTextSize(1);
 }
 
 void checkActivation() {
@@ -1916,9 +2038,52 @@ void checkActivation() {
     }
 }
 
+// Función para resetear las variables de entorno al inicio
+void resetEnvironmentVariables() {
+    if (AUTO_RESET_ON_STARTUP) {
+        Serial.println("==========================================");
+        Serial.println("        RESETEO AUTOMÁTICO ACTIVADO      ");
+        Serial.println("==========================================");
+        Serial.println("Reseteando variables de entorno...");
+        
+        // Limpiar todas las preferencias guardadas
+        preferences.begin("wifi", false);
+        preferences.clear();
+        preferences.end();
+        
+        // Reinicializar con valores por defecto
+        preferences.begin("wifi", false);
+        preferences.putInt("currentVersion", 0);
+        preferences.putInt("pixieId", 0);
+        preferences.putInt("brightness", 50);
+        preferences.putInt("maxPhotos", 5);
+        preferences.putUInt("secsPhotos", 30000);
+        preferences.putString("ssid", "");
+        preferences.putString("password", "");
+        preferences.putBool("allowSpotify", false);
+        preferences.putString("code", "0000");
+        preferences.end();
+        
+        // Resetear variables globales
+        brightness = 50;
+        maxPhotos = 5;
+        secsPhotos = 30000;
+        allowSpotify = false;
+        activationCode = "0000";
+        currentVersion = 0;
+        pixieId = 0;
+        
+        Serial.println("Variables de entorno reseteadas exitosamente!");
+        Serial.println("==========================================");
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
+    
+    // Resetear variables de entorno al inicio si está habilitado
+    resetEnvironmentVariables();
     
     // Mostrar información del modo de desarrollo
     if (DEV) {
