@@ -12,6 +12,7 @@
 #include <Preferences.h> // Para guardar las credenciales en memoria
 #include <WebServer.h>   // Para el servidor web en modo AP
 #include <PubSubClient.h>
+#include <esp_task_wdt.h>
 
 // Configuración MQTT
 const char *MQTT_BROKER_URL = "mqtt.mypixelframe.com";
@@ -102,6 +103,14 @@ int drawCommandCount = 0;
 unsigned long lastDrawingUpdate = 0;
 const unsigned long DRAWING_UPDATE_INTERVAL = 20; // Actualizar cada 20ms (50 FPS)
 
+// Configuración de estabilidad y timeouts
+#define WDT_TIMEOUT 30              // Watchdog timeout en segundos
+#define MQTT_MAX_RETRIES 5          // Máximo intentos de conexión MQTT
+#define MQTT_RETRY_DELAY 3000       // Delay entre reintentos MQTT (ms)
+#define ACTIVATION_TIMEOUT 300000   // Timeout activación: 5 minutos
+#define HTTP_TIMEOUT 10000          // Timeout para llamadas HTTP API (ms)
+#define HTTP_TIMEOUT_DOWNLOAD 30000 // Timeout para descargas (ms)
+
 // Dirty rectangle tracking
 int dirtyMinX = PANEL_RES_X;
 int dirtyMaxX = -1;
@@ -133,6 +142,7 @@ void wait(int ms)
     unsigned long startTime = millis();
     while (millis() - startTime < ms)
     {
+        esp_task_wdt_reset();
         mqttClient.loop();
         ArduinoOTA.handle();
         yield();
@@ -447,6 +457,7 @@ void fetchAndDrawCover()
     Serial.println("Conectando al servidor...");
     // Cambiar endpoint para recibir datos binarios
     http.begin(*client, String(serverUrl) + "public/spotify/" + "cover-64x64-binary?pixie_id=" + String(pixieId));
+    http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
     if (httpCode == 200)
@@ -507,7 +518,14 @@ void fetchAndDrawCover()
         }
         
         free(imageBuffer);
-        
+
+        // Limpiar el texto del título de la foto anterior
+        titleNeedsScroll = false;
+        currentTitle = "";
+        currentName = "";
+        // Limpiar el área inferior donde aparece el texto (últimas 8 líneas aprox)
+        dma_display->fillRect(0, PANEL_RES_Y - 10, PANEL_RES_X, 10, myBLACK);
+
         // Limpiar mensaje de carga después de mostrar la portada
         loadingMsg = "";
     }
@@ -527,6 +545,7 @@ String fetchSongId()
     WiFiClient *client = getWiFiClient();
     HTTPClient http;
     http.begin(*client, String(serverUrl) + "public/spotify/" + "id-playing?pixie_id=" + String(pixieId));
+    http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
     if (httpCode == 200)
@@ -624,6 +643,7 @@ void getPixie()
     Serial.println("Fetching Pixie details...");
 
     http.begin(*client, String(serverUrl) + "public/pixie/?id=" + String(pixieId));
+    http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
     if (httpCode == 200)
@@ -885,6 +905,7 @@ void showPhoto(String url)
 
     Serial.println("Conectando a: " + url);
     http.begin(*client, url);
+    http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
 
     int httpCode = http.GET();
     if (httpCode != 200)
@@ -957,6 +978,7 @@ void showPhotoFromCenter(const String &url)
 
     Serial.println("Conectando a: " + url);
     http.begin(*client, url);
+    http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
 
     int httpCode = http.GET();
     if (httpCode != 200)
@@ -1140,6 +1162,7 @@ void checkForUpdates()
 
     Serial.println("Conectando a: " + String(serverUrl) + "public/version/latest");
     http.begin(*client, String(serverUrl) + "public/version/latest");
+    http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
     if (httpCode == 200)
@@ -1257,6 +1280,7 @@ void registerPixie()
     Serial.println("Registering Pixie with MAC: " + macAddress);
 
     http.begin(*client, String(serverUrl) + "public/pixie/add");
+    http.setTimeout(HTTP_TIMEOUT);
     http.addHeader("Content-Type", "application/json");
 
     JsonDocument doc;
@@ -1492,31 +1516,34 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 // Función para reconectar al broker MQTT
 void mqttReconnect()
 {
-    while (!mqttClient.connected())
+    int retryCount = 0;
+
+    while (!mqttClient.connected() && retryCount < MQTT_MAX_RETRIES)
     {
-        Serial.print("Intentando conexión MQTT a ");
+        Serial.print("Intentando conexión MQTT (intento ");
+        Serial.print(retryCount + 1);
+        Serial.print("/");
+        Serial.print(MQTT_MAX_RETRIES);
+        Serial.print(") a ");
         Serial.print(MQTT_BROKER_URL);
         Serial.print(":");
         Serial.print(MQTT_BROKER_PORT);
-        Serial.print("...");
-        
+        Serial.println("...");
+
         String clientId = String(MQTT_CLIENT_ID) + String(pixieId);
-        Serial.print(" con cliente ID: ");
-        Serial.println(clientId);
 
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
         {
             Serial.println("MQTT conectado exitosamente!");
-            // Suscribirse al tema específico del pixie
             String topic = String("pixie/") + String(pixieId);
             Serial.println("Suscribiendo al tema: " + topic);
             if (mqttClient.subscribe(topic.c_str())) {
                 Serial.println("Suscripción exitosa");
-                // Limpiar mensaje de conexión después de conectar exitosamente
                 loadingMsg = "";
             } else {
                 Serial.println("Error en la suscripción");
             }
+            return;  // Conexión exitosa
         }
         else
         {
@@ -1535,9 +1562,21 @@ void mqttReconnect()
                 case 4: Serial.print("MQTT_CONNECT_BAD_CREDENTIALS"); break;
                 case 5: Serial.print("MQTT_CONNECT_UNAUTHORIZED"); break;
             }
-            Serial.println(") reintentando en 5 segundos");
-            delay(5000);
+            Serial.println(")");
+            retryCount++;
+            if (retryCount < MQTT_MAX_RETRIES) {
+                Serial.printf("Reintentando en %d ms...\n", MQTT_RETRY_DELAY);
+                delay(MQTT_RETRY_DELAY);
+            }
         }
+    }
+
+    if (!mqttClient.connected()) {
+        Serial.println("MQTT: Max reintentos alcanzado - reiniciando ESP32...");
+        dma_display->clearScreen();
+        showLoadingMsg("MQTT Error");
+        delay(3000);
+        ESP.restart();
     }
 }
 
@@ -2020,21 +2059,43 @@ void showActivationCode(String code) {
 
 void checkActivation() {
     String currentCode = preferences.getString("code", "0000");
-    Serial.println(currentCode);
-    if (currentCode != "0000") {
+    Serial.println("Código de activación: " + currentCode);
+
+    if (currentCode != "0000")
+    {
         showActivationCode(currentCode);
-        
-        // Polling cada 2 segundos hasta que el código sea "0000"
-        while (currentCode != "0000") {
-            getPixie(); // Esto actualizará el código si ha cambiado
+
+        unsigned long startTime = millis();
+        int attempts = 0;
+
+        while (currentCode != "0000" && millis() - startTime < ACTIVATION_TIMEOUT)
+        {
+            esp_task_wdt_reset();  // Reset watchdog durante espera larga
+            getPixie();
             currentCode = preferences.getString("code", "0000");
+            attempts++;
+
+            if (attempts % 10 == 0) {
+                Serial.printf("Esperando activación... (%lu segundos)\n",
+                              (millis() - startTime) / 1000);
+            }
             delay(2000);
         }
-        
-        // Una vez activado, mostrar mensaje de éxito
+
         dma_display->clearScreen();
-        showLoadingMsg("Device activated!");
-        delay(2000);
+        if (currentCode == "0000")
+        {
+            showLoadingMsg("Activated!");
+            Serial.println("Dispositivo activado correctamente");
+            delay(2000);
+        }
+        else
+        {
+            showLoadingMsg("Timeout");
+            Serial.println("Timeout de activación - reiniciando ESP32...");
+            delay(2000);
+            ESP.restart();
+        }
     }
 }
 
@@ -2221,7 +2282,12 @@ void setup()
     // Conectar a MQTT
     showLoadingMsg("Connecting server");
     mqttReconnect();
-    
+
+    // Inicializar Watchdog Timer
+    esp_task_wdt_init(WDT_TIMEOUT, true);
+    esp_task_wdt_add(NULL);
+    Serial.println("Watchdog timer inicializado");
+
     showLoadingMsg("Ready!");
 }
 
@@ -2229,6 +2295,8 @@ String songOnline = "";
 
 void loop()
 {
+    esp_task_wdt_reset();
+
     // Si estamos en modo AP, manejar el servidor web
     if (apMode) {
         webServer.handleClient();
@@ -2268,7 +2336,9 @@ void loop()
 
     // Si estamos conectados a WiFi, se ejecuta la lógica original:
     if (allowSpotify) {
-        if (millis() - lastSpotifyCheck >= timeToCheckSpotify) {
+        // Solo llamar a fetchSongId si el scroll no está activo (evita bloquear el scroll)
+        bool scrollActive = titleNeedsScroll && (titleScrollState == SCROLL_SCROLLING || titleScrollState == SCROLL_RETURNING);
+        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive) {
             songOnline = fetchSongId();
             lastSpotifyCheck = millis();
         }
