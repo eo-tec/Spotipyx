@@ -84,6 +84,9 @@ bool titleNeedsScroll = false;
 int titleY = 0;
 int nameY = 0;
 
+// Flag para evitar condiciones de carrera en descarga de fotos
+volatile bool isLoadingPhoto = false;
+
 // Variables para el modo de dibujo
 bool drawingMode = false;
 uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X]; // Buffer separado para dibujo
@@ -900,6 +903,13 @@ void showPhotoInfo(String title, String name)
 
 void showPhoto(String url)
 {
+    // Evitar condiciones de carrera
+    if (isLoadingPhoto) {
+        Serial.println("Ya hay una foto cargándose, ignorando petición");
+        return;
+    }
+    isLoadingPhoto = true;
+
     WiFiClient *client = getWiFiClient();
     HTTPClient http;
 
@@ -914,6 +924,7 @@ void showPhoto(String url)
         http.end();
         delay(50);
         delete client;
+        isLoadingPhoto = false;
         return;
     }
 
@@ -933,35 +944,54 @@ void showPhoto(String url)
     title[titleLen] = '\0';
     username[usernameLen] = '\0';
 
+    // Descargar imagen completa a buffer temporal antes de mostrar
+    const int totalBytes = 64 * 64 * 3;
+    uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
+    if (!imageBuffer)
+    {
+        Serial.println("Error: no hay memoria para imageBuffer");
+        http.end();
+        delay(50);
+        delete client;
+        isLoadingPhoto = false;
+        return;
+    }
+
+    size_t received = stream->readBytes(imageBuffer, totalBytes);
+
+    // Validar que se recibió la imagen completa
+    if (received != totalBytes)
+    {
+        Serial.printf("Error: esperados %d bytes pero recibidos %d - DESCARTANDO imagen\n", totalBytes, received);
+        free(imageBuffer);
+        http.end();
+        delay(50);
+        delete client;
+        isLoadingPhoto = false;
+        return;
+    }
+
+    // Solo hacer fadeOut DESPUÉS de confirmar que la imagen está completa
     fadeOut();
     dma_display->clearScreen();
-    
+
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
-    const int bytesPerLine = 64 * 3;
-    uint8_t lineBuffer[bytesPerLine];
-
+    // Copiar al screenBuffer desde el buffer temporal validado
     for (int y = 0; y < 64; y++)
     {
-        size_t received = stream->readBytes(lineBuffer, bytesPerLine);
-
-        if (received != bytesPerLine)
-        {
-            Serial.printf("Error: esperados %d bytes pero recibidos %d\n", bytesPerLine, received);
-            break;
-        }
-
         for (int x = 0; x < 64; x++)
         {
-            uint8_t g = lineBuffer[x * 3];
-            uint8_t b = lineBuffer[x * 3 + 1];
-            uint8_t r = lineBuffer[x * 3 + 2];
-
-            uint16_t color = dma_display->color565(r, g, b);
-            screenBuffer[y][x] = color;
+            int idx = (y * 64 + x) * 3;
+            uint8_t g = imageBuffer[idx];
+            uint8_t b = imageBuffer[idx + 1];
+            uint8_t r = imageBuffer[idx + 2];
+            screenBuffer[y][x] = dma_display->color565(r, g, b);
         }
     }
+
+    free(imageBuffer);
 
     fadeIn();
     showPhotoInfo(String(title), String(username));
@@ -969,10 +999,18 @@ void showPhoto(String url)
     http.end();
     delay(50);
     delete client;
+    isLoadingPhoto = false;
 }
 
 void showPhotoFromCenter(const String &url)
 {
+    // Evitar condiciones de carrera
+    if (isLoadingPhoto) {
+        Serial.println("Ya hay una foto cargándose, ignorando petición");
+        return;
+    }
+    isLoadingPhoto = true;
+
     WiFiClient *client = getWiFiClient();
     HTTPClient http;
 
@@ -987,6 +1025,7 @@ void showPhotoFromCenter(const String &url)
         http.end();
         delay(50);
         delete client;
+        isLoadingPhoto = false;
         return;
     }
 
@@ -1049,6 +1088,7 @@ void showPhotoFromCenter(const String &url)
         http.end();
         delay(50);
         delete client;
+        isLoadingPhoto = false;
         return;
     }
 
@@ -1061,6 +1101,7 @@ void showPhotoFromCenter(const String &url)
         http.end();
         delay(50);
         delete client;
+        isLoadingPhoto = false;
         return;
     }
 
@@ -1094,6 +1135,7 @@ void showPhotoFromCenter(const String &url)
     delay(50);
     delete client;
     songShowing = "";
+    isLoadingPhoto = false;
 }
 
 void showPhotoIndex(int photoIndex)
