@@ -1,0 +1,11 @@
+{
+  "name": "pixie-tools",
+  "version": "1.0.0",
+  "description": "Herramientas locales para Pixie ESP32",
+  "scripts": {
+    "convert": "node image-to-pixie.js"
+  },
+  "dependencies": {
+    "sharp": "^0.33.0"
+  }
+}

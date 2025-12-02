@@ -9,6 +9,7 @@
 #include <Fonts/Picopixel.h>
 #include <ArduinoOTA.h>
 #include <pics.h>        // Aquí se asume que en pics.h están definidas las imágenes (incluido "qr")
+#include <logo.h>        // Logo personalizado 64x64 RGB
 #include <Preferences.h> // Para guardar las credenciales en memoria
 #include <WebServer.h>   // Para el servidor web en modo AP
 #include <PubSubClient.h>
@@ -450,50 +451,52 @@ void pushUpAnimation(int y, JsonArray &data)
     }
 }
 
-// Función para descargar y mostrar la portada (ya existente)
+// Buffers estáticos para Spotify (evita fragmentación de memoria)
+static uint8_t spotifyCoverBuffer[64 * 64 * 2];  // 8192 bytes para imagen
+static char songIdBuffer[64];
+static char httpBuffer[512];
+
+// Cliente WiFi reutilizable para Spotify (evita fragmentación)
+static WiFiClientSecure *spotifyClient = nullptr;
+static HTTPClient spotifyHttp;
+
+void ensureSpotifyClient() {
+    if (spotifyClient == nullptr) {
+        spotifyClient = new WiFiClientSecure();
+        spotifyClient->setInsecure();
+    }
+}
+
+// Función para descargar y mostrar la portada
 void fetchAndDrawCover()
 {
     lastPhotoChange = millis();
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
+    ensureSpotifyClient();
 
     Serial.println("Conectando al servidor...");
-    // Cambiar endpoint para recibir datos binarios
-    http.begin(*client, String(serverUrl) + "public/spotify/" + "cover-64x64-binary?pixie_id=" + String(pixieId));
-    http.setTimeout(HTTP_TIMEOUT);
-    int httpCode = http.GET();
+
+    // Construir URL en buffer estático
+    snprintf(httpBuffer, sizeof(httpBuffer), "%spublic/spotify/cover-64x64-binary?pixie_id=%d", serverUrl, pixieId);
+
+    spotifyHttp.begin(*spotifyClient, httpBuffer);
+    spotifyHttp.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
+    spotifyHttp.setReuse(true);
+    int httpCode = spotifyHttp.GET();
 
     if (httpCode == 200)
     {
-        WiFiClient *stream = http.getStreamPtr();
-        
-        // No limpiar pantalla para evitar parpadeo negro
-        
-        // Leer toda la imagen primero en un buffer temporal
-        const int totalBytes = 64 * 64 * 2; // 64x64 píxeles * 2 bytes (RGB565)
-        uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
-        
-        if (!imageBuffer)
-        {
-            Serial.println("Error: no hay suficiente memoria para cargar la imagen.");
-            http.end();
-            delay(50);
-            delete client;
-            return;
-        }
-        
-        size_t totalReceived = stream->readBytes(imageBuffer, totalBytes);
-        
+        WiFiClient *stream = spotifyHttp.getStreamPtr();
+
+        const int totalBytes = 64 * 64 * 2;
+        size_t totalReceived = stream->readBytes(spotifyCoverBuffer, totalBytes);
+
         if (totalReceived != totalBytes)
         {
             Serial.printf("Error: esperados %d bytes pero recibidos %d\n", totalBytes, totalReceived);
-            free(imageBuffer);
-            http.end();
-            delay(50);
-            delete client;
+            spotifyHttp.end();
             return;
         }
-        
+
         // Mostrar la imagen con animación push up
         for (int y = 0; y < 64; y++)
         {
@@ -507,83 +510,95 @@ void fetchAndDrawCover()
                     screenBuffer[moveY][x] = color;
                 }
             }
-            
+
             // Dibujar la nueva línea en la parte inferior (línea 63)
             for (int x = 0; x < 64; x++)
             {
                 int bufferIdx = (y * 64 + x) * 2;
-                uint16_t color = (imageBuffer[bufferIdx] << 8) | imageBuffer[bufferIdx + 1];
+                uint16_t color = (spotifyCoverBuffer[bufferIdx] << 8) | spotifyCoverBuffer[bufferIdx + 1];
                 drawPixelWithBuffer(x, 63, color);
                 screenBuffer[63][x] = color;
             }
-            
-            delay(15); // Velocidad de la animación (más lenta)
+
+            delay(15);
         }
-        
-        free(imageBuffer);
 
         // Limpiar el texto del título de la foto anterior
         titleNeedsScroll = false;
         currentTitle = "";
         currentName = "";
-        // Limpiar el área inferior donde aparece el texto (últimas 8 líneas aprox)
-        dma_display->fillRect(0, PANEL_RES_Y - 10, PANEL_RES_X, 10, myBLACK);
-
-        // Limpiar mensaje de carga después de mostrar la portada
         loadingMsg = "";
     }
     else
     {
         Serial.printf("Error en la solicitud: %d\n", httpCode);
+        if (httpCode < 0) {
+            // Error de conexión - reconectar cliente
+            delete spotifyClient;
+            spotifyClient = nullptr;
+        }
         showTime();
     }
-    http.end();
-    delay(50);
-    delete client;
+    spotifyHttp.end();
 }
 
-// Función para obtener el ID de la canción en reproducción (ya existente)
+// Función para obtener el ID de la canción en reproducción
 String fetchSongId()
 {
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
-    http.begin(*client, String(serverUrl) + "public/spotify/" + "id-playing?pixie_id=" + String(pixieId));
-    http.setTimeout(HTTP_TIMEOUT);
-    int httpCode = http.GET();
+    ensureSpotifyClient();
+
+    // Construir URL en buffer estático
+    snprintf(httpBuffer, sizeof(httpBuffer), "%spublic/spotify/id-playing?pixie_id=%d", serverUrl, pixieId);
+
+    spotifyHttp.begin(*spotifyClient, httpBuffer);
+    spotifyHttp.setTimeout(HTTP_TIMEOUT);
+    spotifyHttp.setReuse(true);  // Reutilizar conexión
+    int httpCode = spotifyHttp.GET();
+
+    songIdBuffer[0] = '\0';  // Limpiar buffer
 
     if (httpCode == 200)
     {
-        // Usar un buffer estático más pequeño y parseo manual
-        String response = http.getString();
-        http.end();
-        delay(50);
-        delete client;
-        
-        // Parseo manual simple para extraer el id
-        int idIndex = response.indexOf("\"id\":\"");
-        if (idIndex != -1) {
-            idIndex += 6; // Mover más allá de "id":"
-            int endIndex = response.indexOf("\"", idIndex);
-            if (endIndex != -1) {
-                String songId = response.substring(idIndex, endIndex);
-                if (songId.length() > 0) {
-                    Serial.printf("ID de la canción en reproducción: %s\n", songId.c_str());
-                    return songId;
+        // Leer directamente en buffer estático
+        WiFiClient *stream = spotifyHttp.getStreamPtr();
+        int len = spotifyHttp.getSize();
+
+        if (len > 0 && len < (int)sizeof(httpBuffer)) {
+            int bytesRead = stream->readBytes(httpBuffer, min(len, (int)sizeof(httpBuffer) - 1));
+            httpBuffer[bytesRead] = '\0';
+
+            // Parseo manual simple para extraer el id
+            char *idStart = strstr(httpBuffer, "\"id\":\"");
+            if (idStart) {
+                idStart += 6;
+                char *idEnd = strchr(idStart, '"');
+                if (idEnd && (idEnd - idStart) < 63) {
+                    int idLen = idEnd - idStart;
+                    strncpy(songIdBuffer, idStart, idLen);
+                    songIdBuffer[idLen] = '\0';
+                    Serial.printf("ID de la canción en reproducción: %s\n", songIdBuffer);
                 }
             }
         }
-        
-        Serial.println("No hay canción en reproducción.");
-        return "";
+
+        if (songIdBuffer[0] == '\0') {
+            Serial.println("No hay canción en reproducción.");
+        }
     }
-    else
+    else if (httpCode > 0)
     {
         Serial.printf("Error en la solicitud: %d\n", httpCode);
     }
-    http.end();
-    delay(50);
-    delete client;
-    return "";
+    else
+    {
+        Serial.printf("Error de conexión: %s\n", spotifyHttp.errorToString(httpCode).c_str());
+        // Reconectar cliente si hay error de conexión
+        delete spotifyClient;
+        spotifyClient = nullptr;
+    }
+
+    spotifyHttp.end();
+    return String(songIdBuffer);
 }
 
 // Funciones de fade in/out (ya existentes)
@@ -1622,92 +1637,20 @@ void mqttReconnect()
     }
 }
 
-// Función para dibujar el logo con efecto arcoiris
+// Función para dibujar el logo desde logo.h (64x64 RGB)
 void drawLogo()
 {
-    static uint8_t hue = 0;   // Variable estática para mantener el estado del color
-    const int LOGO_SIZE = 32; // Tamaño del logo (32x32)
-    const int offsetX = 16;
-    const int offsetY = 10;
-
-    for (int y = 0; y < LOGO_SIZE; y++)
+    for (int y = 0; y < 64; y++)
     {
-        for (int x = 0; x < LOGO_SIZE; x++)
+        for (int x = 0; x < 64; x++)
         {
-            int index = y * LOGO_SIZE + x;
-            const uint32_t pixel = logo[0][index];
-
-            // Extraer los componentes ARGB
-            uint8_t alpha = (pixel >> 24) & 0xFF;
-            uint8_t red = (pixel >> 16) & 0xFF;
-            uint8_t green = (pixel >> 8) & 0xFF;
-            uint8_t blue = pixel & 0xFF;
-
-            if (alpha > 0)
-            { // Si el píxel no es transparente
-                if (red == 0xFF && green == 0xFF && blue == 0xFF)
-                { // Si el píxel es blanco
-                    // Convertir el color HSV a RGB
-                    uint8_t r, g, b;
-                    uint8_t h = hue + (x + y) * 2; // Variar el tono según la posición
-                    uint8_t s = 255;               // Saturación máxima
-                    uint8_t v = 255;               // Valor máximo
-
-                    // Conversión HSV a RGB
-                    uint8_t region = h / 43;
-                    uint8_t remainder = (h - (region * 43)) * 6;
-                    uint8_t p = (v * (255 - s)) >> 8;
-                    uint8_t q = (v * (255 - ((s * remainder) >> 8))) >> 8;
-                    uint8_t t = (v * (255 - ((s * (255 - remainder)) >> 8))) >> 8;
-
-                    switch (region)
-                    {
-                    case 0:
-                        r = v;
-                        g = t;
-                        b = p;
-                        break;
-                    case 1:
-                        r = q;
-                        g = v;
-                        b = p;
-                        break;
-                    case 2:
-                        r = p;
-                        g = v;
-                        b = t;
-                        break;
-                    case 3:
-                        r = p;
-                        g = q;
-                        b = v;
-                        break;
-                    case 4:
-                        r = t;
-                        g = p;
-                        b = v;
-                        break;
-                    default:
-                        r = v;
-                        g = p;
-                        b = q;
-                        break;
-                    }
-
-                    // Dibujar el píxel con el nuevo color
-                    drawPixelWithBuffer(x + offsetX, y + offsetY, dma_display->color565(r, b, g));
-                }
-                else
-                {
-                    // Mantener el color original para píxeles no blancos
-                    drawPixelWithBuffer(x + offsetX, y + offsetY, dma_display->color565(red, blue, green));
-                }
-            }
+            int idx = (y * 64 + x) * 3;
+            uint8_t g = pgm_read_byte(&LOGO_DATA[idx]);
+            uint8_t r = pgm_read_byte(&LOGO_DATA[idx + 1]);
+            uint8_t b = pgm_read_byte(&LOGO_DATA[idx + 2]);
+            drawPixelWithBuffer(x, y, dma_display->color565(r, g, b));
         }
     }
-
-    // Incrementar el tono para la siguiente llamada
-    hue += 2;
 }
 
 // Función para generar la página HTML de configuración WiFi
@@ -2243,11 +2186,11 @@ void setup()
     unsigned long startAttemptTime = millis();
     dma_display->clearScreen();
     dma_display->fillScreen(myWHITE);
+    drawLogo();  // Dibujar logo solo una vez
 
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
-        drawLogo();
         showLoadingMsg("Connecting WiFi");
-        delay(10);
+        delay(100);
     }
 
     if (WiFi.status() != WL_CONNECTED) {
