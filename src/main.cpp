@@ -15,6 +15,11 @@
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
 
+// Macros de logging con timestamp
+#define LOG(msg) Serial.printf("[%lu] %s\n", millis(), msg)
+#define LOGF(fmt, ...) Serial.printf("[%lu] " fmt "\n", millis(), ##__VA_ARGS__)
+#define LOGF_NL(fmt, ...) Serial.printf("[%lu] " fmt, millis(), ##__VA_ARGS__)
+
 // Configuración MQTT
 const char *MQTT_BROKER_URL = "mqtt.mypixelframe.com";
 const int MQTT_BROKER_PORT = 1883;
@@ -127,19 +132,10 @@ bool apMode = false; // Se activará si no hay credenciales guardadas
 bool allowSpotify = true;
 WebServer webServer(80); // Servidor web para configuración WiFi
 
-WiFiClient *getWiFiClient()
-{
-    if (DEV)
-    {
-        return new WiFiClient();
-    }
-    else
-    {
-        WiFiClientSecure *clientSecure = new WiFiClientSecure();
-        clientSecure->setInsecure();
-        return clientSecure;
-    }
-}
+// getWiFiClient() eliminado - ahora usamos clientes estáticos reutilizables:
+// - spotifyClient para Spotify
+// - httpClient para fotos
+// - httpClient para API general (getPixie, registerPixie, checkForUpdates)
 
 void wait(int ms)
 {
@@ -192,7 +188,7 @@ void enterDrawingMode() {
     lastDrawingActivity = millis();
     
     if (!DEV) {
-        Serial.println("Entering drawing mode");
+        LOG("Entering drawing mode");
     }
     
     // Inicializar buffer de dibujo con canvas negro
@@ -211,7 +207,7 @@ void exitDrawingMode() {
     drawingMode = false;
     
     if (!DEV) {
-        Serial.println("Exiting drawing mode");
+        LOG("Exiting drawing mode");
     }
     
     // Volver al modo normal (mostrar fotos)
@@ -284,7 +280,7 @@ void clearDrawingCanvas() {
 void checkDrawingTimeout() {
     if (drawingMode && (millis() - lastDrawingActivity > DRAWING_TIMEOUT)) {
         if (!DEV) {
-            Serial.println("Drawing mode timeout - returning to photo mode");
+            LOG("Drawing mode timeout - returning to photo mode");
         }
         exitDrawingMode();
     }
@@ -424,8 +420,7 @@ void showTime()
     dma_display->setFont(&FreeSans12pt7b);
     dma_display->setCursor(3, 38); // Centrar en el panel
     dma_display->print(currentTime);
-    Serial.print("Hora: ");
-    Serial.println(currentTime);
+    LOGF("Hora: %s", currentTime.c_str());
 }
 
 
@@ -456,14 +451,36 @@ static uint8_t spotifyCoverBuffer[64 * 64 * 2];  // 8192 bytes para imagen
 static char songIdBuffer[64];
 static char httpBuffer[512];
 
+// Buffer estático para fotos (evita fragmentación de memoria)
+static uint8_t photoBuffer[64 * 64 * 3];  // 12288 bytes para imagen RGB888
+
 // Cliente WiFi reutilizable para Spotify (evita fragmentación)
 static WiFiClientSecure *spotifyClient = nullptr;
 static HTTPClient spotifyHttp;
 
+// Cliente WiFi reutilizable para HTTP general (fotos, API, etc.)
+static WiFiClientSecure *httpClient = nullptr;
+static HTTPClient http;
+
 void ensureSpotifyClient() {
-    if (spotifyClient == nullptr) {
-        spotifyClient = new WiFiClientSecure();
-        spotifyClient->setInsecure();
+    // Siempre crear cliente nuevo para evitar memory leaks de mbedTLS
+    // Los buffers SSL (~40KB) deben liberarse entre conexiones
+    if (spotifyClient != nullptr) {
+        spotifyClient->stop();
+        delete spotifyClient;
+    }
+    spotifyClient = new WiFiClientSecure();
+    spotifyClient->setInsecure();
+}
+
+void ensureHttpClient() {
+    // Solo crear cliente si no existe - evitar new/delete constantes
+    // Ver: https://github.com/espressif/arduino-esp32/issues/6561
+    if (httpClient == nullptr) {
+        httpClient = new WiFiClientSecure();
+        httpClient->setInsecure();
+    } else {
+        httpClient->stop();  // Cerrar conexión anterior si existe
     }
 }
 
@@ -473,30 +490,48 @@ void fetchAndDrawCover()
     lastPhotoChange = millis();
     ensureSpotifyClient();
 
-    Serial.println("Conectando al servidor...");
+    LOG("[Spotify] Fetching cover...");
+
+    esp_task_wdt_reset();  // Reset watchdog antes de operación larga
 
     // Construir URL en buffer estático
     snprintf(httpBuffer, sizeof(httpBuffer), "%spublic/spotify/cover-64x64-binary?pixie_id=%d", serverUrl, pixieId);
 
+    LOG("[Spotify] HTTP begin");
     spotifyHttp.begin(*spotifyClient, httpBuffer);
     spotifyHttp.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
-    spotifyHttp.setReuse(true);
+
+    LOG("[Spotify] HTTP GET start");
     int httpCode = spotifyHttp.GET();
+    LOGF("[Spotify] HTTP GET done, code: %d", httpCode);
+
+    esp_task_wdt_reset();  // Reset watchdog después de GET
 
     if (httpCode == 200)
     {
         WiFiClient *stream = spotifyHttp.getStreamPtr();
 
         const int totalBytes = 64 * 64 * 2;
+        LOGF("[Spotify] Reading %d bytes", totalBytes);
         size_t totalReceived = stream->readBytes(spotifyCoverBuffer, totalBytes);
+        LOGF("[Spotify] Read complete, got %d bytes", totalReceived);
+
+        esp_task_wdt_reset();  // Reset watchdog después de descarga
 
         if (totalReceived != totalBytes)
         {
-            Serial.printf("Error: esperados %d bytes pero recibidos %d\n", totalBytes, totalReceived);
+            LOGF("[Spotify] Error: esperados %d bytes pero recibidos %d", totalBytes, totalReceived);
             spotifyHttp.end();
+            // Liberar cliente SSL para recuperar ~40KB de memoria
+            if (spotifyClient != nullptr) {
+                spotifyClient->stop();
+                delete spotifyClient;
+                spotifyClient = nullptr;
+            }
             return;
         }
 
+        LOG("[Spotify] Animation start");
         // Mostrar la imagen con animación push up
         for (int y = 0; y < 64; y++)
         {
@@ -520,8 +555,9 @@ void fetchAndDrawCover()
                 screenBuffer[63][x] = color;
             }
 
-            delay(15);
+            wait(15);  // Usar wait() en lugar de delay() para alimentar el watchdog
         }
+        LOG("[Spotify] Animation done");
 
         // Limpiar el texto del título de la foto anterior
         titleNeedsScroll = false;
@@ -531,15 +567,18 @@ void fetchAndDrawCover()
     }
     else
     {
-        Serial.printf("Error en la solicitud: %d\n", httpCode);
-        if (httpCode < 0) {
-            // Error de conexión - reconectar cliente
-            delete spotifyClient;
-            spotifyClient = nullptr;
-        }
+        LOGF("[Spotify] Error HTTP: %d", httpCode);
         showTime();
     }
     spotifyHttp.end();
+
+    // Liberar cliente SSL para recuperar ~40KB de memoria
+    if (spotifyClient != nullptr) {
+        spotifyClient->stop();
+        delete spotifyClient;
+        spotifyClient = nullptr;
+    }
+    LOG("[Spotify] Done");
 }
 
 // Función para obtener el ID de la canción en reproducción
@@ -552,7 +591,6 @@ String fetchSongId()
 
     spotifyHttp.begin(*spotifyClient, httpBuffer);
     spotifyHttp.setTimeout(HTTP_TIMEOUT);
-    spotifyHttp.setReuse(true);  // Reutilizar conexión
     int httpCode = spotifyHttp.GET();
 
     songIdBuffer[0] = '\0';  // Limpiar buffer
@@ -576,28 +614,32 @@ String fetchSongId()
                     int idLen = idEnd - idStart;
                     strncpy(songIdBuffer, idStart, idLen);
                     songIdBuffer[idLen] = '\0';
-                    Serial.printf("ID de la canción en reproducción: %s\n", songIdBuffer);
+                    // Solo log si es una canción diferente
+                    if (songShowing != String(songIdBuffer)) {
+                        LOGF("Nueva canción: %s", songIdBuffer);
+                    }
                 }
             }
         }
 
-        if (songIdBuffer[0] == '\0') {
-            Serial.println("No hay canción en reproducción.");
-        }
     }
     else if (httpCode > 0)
     {
-        Serial.printf("Error en la solicitud: %d\n", httpCode);
+        LOGF("[Spotify:fetchSongId] Error HTTP al obtener ID canción: %d", httpCode);
     }
     else
     {
-        Serial.printf("Error de conexión: %s\n", spotifyHttp.errorToString(httpCode).c_str());
-        // Reconectar cliente si hay error de conexión
-        delete spotifyClient;
-        spotifyClient = nullptr;
+        LOGF("[Spotify:fetchSongId] Error de conexión: %s", spotifyHttp.errorToString(httpCode).c_str());
     }
 
     spotifyHttp.end();
+
+    // Liberar cliente SSL para recuperar ~40KB de memoria
+    if (spotifyClient != nullptr) {
+        spotifyClient->stop();
+        delete spotifyClient;
+        spotifyClient = nullptr;
+    }
     return String(songIdBuffer);
 }
 
@@ -655,12 +697,11 @@ void fadeIn()
 
 void getPixie()
 {
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
+    ensureHttpClient();
 
-    Serial.println("Fetching Pixie details...");
+    LOG("Fetching Pixie details...");
 
-    http.begin(*client, String(serverUrl) + "public/pixie/?id=" + String(pixieId));
+    http.begin(*httpClient, String(serverUrl) + "public/pixie/?id=" + String(pixieId));
     http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
@@ -669,11 +710,11 @@ void getPixie()
         JsonDocument doc;
         delay(250);                    // Puede ayudar
         DeserializationError error = deserializeJson(doc, http.getStream());
-        Serial.println(doc["pixie"]["code"].as<String>());
+        LOGF("Code: %s", doc["pixie"]["code"].as<String>().c_str());
         if (!error)
         {
             brightness = doc["pixie"]["brightness"];
-            dma_display->setBrightness(max(brightness, 10));    
+            dma_display->setBrightness(max(brightness, 10));
             preferences.putInt("brightness", brightness);
             maxPhotos = doc["pixie"]["pictures_on_queue"];
             allowSpotify = doc["pixie"]["spotify_enabled"];
@@ -687,17 +728,22 @@ void getPixie()
         }
         else
         {
-            Serial.print("Error parsing JSON: ");
-            Serial.println(error.c_str());
+            LOGF("[Pixie:getPixie] Error parseando JSON: %s", error.c_str());
         }
     }
     else
     {
-        Serial.printf("Failed to fetch Pixie details. HTTP code: %d\n", httpCode);
+        LOGF("[Pixie:getPixie] Error HTTP al obtener detalles: %d", httpCode);
     }
+
     http.end();
-    delay(50);
-    delete client;
+
+    // Liberar cliente SSL para recuperar memoria
+    if (httpClient != nullptr) {
+        httpClient->stop();
+        delete httpClient;
+        httpClient = nullptr;
+    }
 }
 
 // Función para actualizar el scroll del título
@@ -811,7 +857,7 @@ void showPhotoInfo(String title, String name)
     if (name.length() > 0) {
         dma_display->getTextBounds(name, 0, 0, &nameX1, &nameY1, &nameW, &nameH);
     }
-    Serial.println("titleW: " + String(titleW) + " title: " + title);
+    LOGF("titleW: %d title: %s", titleW, title.c_str());
     
     // Guardar el título y nombre actuales
     currentTitle = title;
@@ -920,68 +966,101 @@ void showPhoto(String url)
 {
     // Evitar condiciones de carrera
     if (isLoadingPhoto) {
-        Serial.println("Ya hay una foto cargándose, ignorando petición");
+        LOG("Ya hay una foto cargándose, ignorando petición");
         return;
     }
     isLoadingPhoto = true;
 
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
+    LOGF("[Photo] Heap libre: %d bytes", ESP.getFreeHeap());
 
-    Serial.println("Conectando a: " + url);
-    http.begin(*client, url);
+    ensureHttpClient();
+
+    LOGF("Conectando a: %s", url.c_str());
+    http.begin(*httpClient, url);
     http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
 
     int httpCode = http.GET();
+    LOGF("[Photo] HTTP GET done, code: %d, heap: %d", httpCode, ESP.getFreeHeap());
+
     if (httpCode != 200)
     {
-        Serial.printf("Error HTTP: %d\n", httpCode);
+        LOGF("[Photo:showPhoto] Error HTTP al descargar foto: %d (URL: %s)", httpCode, url.c_str());
         http.end();
-        delay(50);
-        delete client;
+        if (httpCode < 0 && httpClient != nullptr) {
+            LOG("[Photo] Error de conexión - cerrando cliente");
+            httpClient->stop();
+        }
         isLoadingPhoto = false;
         return;
     }
 
     WiFiClient *stream = http.getStreamPtr();
 
-    // Leer cabecera
-    uint16_t titleLen = (stream->read() << 8) | stream->read();
-    uint16_t usernameLen = (stream->read() << 8) | stream->read();
+    // Leer cabecera con validación de errores
+    int b1 = stream->read();
+    int b2 = stream->read();
+    int b3 = stream->read();
+    int b4 = stream->read();
 
-    char title[titleLen + 1];
-    char username[usernameLen + 1];
-
-    for (int i = 0; i < titleLen; i++)
-        title[i] = stream->read();
-    for (int i = 0; i < usernameLen; i++)
-        username[i] = stream->read();
-    title[titleLen] = '\0';
-    username[usernameLen] = '\0';
-
-    // Descargar imagen completa a buffer temporal antes de mostrar
-    const int totalBytes = 64 * 64 * 3;
-    uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
-    if (!imageBuffer)
-    {
-        Serial.println("Error: no hay memoria para imageBuffer");
+    if (b1 < 0 || b2 < 0 || b3 < 0 || b4 < 0) {
+        LOG("[Photo] Error leyendo cabecera - bytes inválidos");
         http.end();
-        delay(50);
-        delete client;
         isLoadingPhoto = false;
         return;
     }
 
-    size_t received = stream->readBytes(imageBuffer, totalBytes);
+    uint16_t titleLen = (b1 << 8) | b2;
+    uint16_t usernameLen = (b3 << 8) | b4;
+
+    // Limitar tamaño máximo para evitar stack overflow
+    const uint16_t MAX_HEADER_LEN = 128;
+    if (titleLen > MAX_HEADER_LEN || usernameLen > MAX_HEADER_LEN) {
+        LOGF("[Photo] Cabecera corrupta: titleLen=%d, usernameLen=%d", titleLen, usernameLen);
+        http.end();
+        isLoadingPhoto = false;
+        return;
+    }
+
+    char title[MAX_HEADER_LEN + 1];
+    char username[MAX_HEADER_LEN + 1];
+
+    for (int i = 0; i < titleLen; i++) {
+        int c = stream->read();
+        if (c < 0) {
+            LOG("[Photo] Error leyendo título");
+            http.end();
+            isLoadingPhoto = false;
+            return;
+        }
+        title[i] = (char)c;
+    }
+    for (int i = 0; i < usernameLen; i++) {
+        int c = stream->read();
+        if (c < 0) {
+            LOG("[Photo] Error leyendo username");
+            http.end();
+            isLoadingPhoto = false;
+            return;
+        }
+        username[i] = (char)c;
+    }
+    title[titleLen] = '\0';
+    username[usernameLen] = '\0';
+
+    // Usar buffer estático para evitar fragmentación de memoria
+    const int totalBytes = 64 * 64 * 3;
+
+    // Reset watchdog antes de lectura larga
+    esp_task_wdt_reset();
+    size_t received = stream->readBytes(photoBuffer, totalBytes);
+    esp_task_wdt_reset();
+    LOGF("[Photo] Read complete, got %d bytes, heap: %d", received, ESP.getFreeHeap());
 
     // Validar que se recibió la imagen completa
     if (received != totalBytes)
     {
-        Serial.printf("Error: esperados %d bytes pero recibidos %d - DESCARTANDO imagen\n", totalBytes, received);
-        free(imageBuffer);
+        LOGF("[Photo:showPhoto] Error de descarga: esperados %d bytes pero recibidos %d - DESCARTANDO imagen", totalBytes, received);
         http.end();
-        delay(50);
-        delete client;
         isLoadingPhoto = false;
         return;
     }
@@ -993,27 +1072,30 @@ void showPhoto(String url)
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
-    // Copiar al screenBuffer desde el buffer temporal validado
+    // Copiar al screenBuffer desde el buffer estático validado
     for (int y = 0; y < 64; y++)
     {
         for (int x = 0; x < 64; x++)
         {
             int idx = (y * 64 + x) * 3;
-            uint8_t g = imageBuffer[idx];
-            uint8_t b = imageBuffer[idx + 1];
-            uint8_t r = imageBuffer[idx + 2];
+            uint8_t g = photoBuffer[idx];
+            uint8_t b = photoBuffer[idx + 1];
+            uint8_t r = photoBuffer[idx + 2];
             screenBuffer[y][x] = dma_display->color565(r, g, b);
         }
     }
-
-    free(imageBuffer);
 
     fadeIn();
     showPhotoInfo(String(title), String(username));
 
     http.end();
-    delay(50);
-    delete client;
+
+    // Liberar cliente SSL para dar memoria a Spotify
+    if (httpClient != nullptr) {
+        httpClient->stop();
+        delete httpClient;
+        httpClient = nullptr;
+    }
     isLoadingPhoto = false;
 }
 
@@ -1021,45 +1103,85 @@ void showPhotoFromCenter(const String &url)
 {
     // Evitar condiciones de carrera
     if (isLoadingPhoto) {
-        Serial.println("Ya hay una foto cargándose, ignorando petición");
+        LOG("Ya hay una foto cargándose, ignorando petición");
         return;
     }
     isLoadingPhoto = true;
 
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
+    LOGF("[PhotoCenter] Heap libre: %d bytes", ESP.getFreeHeap());
 
-    Serial.println("Conectando a: " + url);
-    http.begin(*client, url);
+    ensureHttpClient();
+
+    LOGF("Conectando a: %s", url.c_str());
+    http.begin(*httpClient, url);
     http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
 
     int httpCode = http.GET();
     if (httpCode != 200)
     {
-        Serial.printf("Error HTTP: %d\n", httpCode);
+        LOGF("[Photo:showPhotoFromCenter] Error HTTP al descargar foto: %d (URL: %s)", httpCode, url.c_str());
         http.end();
-        delay(50);
-        delete client;
+        if (httpCode < 0 && httpClient != nullptr) {
+            LOG("[PhotoCenter] Error de conexión - cerrando cliente");
+            httpClient->stop();
+        }
         isLoadingPhoto = false;
         return;
     }
 
     WiFiClient *stream = http.getStreamPtr();
 
-    // Leer cabecera: título y username
-    uint16_t titleLen = (stream->read() << 8) | stream->read();
-    uint16_t usernameLen = (stream->read() << 8) | stream->read();
+    // Leer cabecera con validación de errores
+    int b1 = stream->read();
+    int b2 = stream->read();
+    int b3 = stream->read();
+    int b4 = stream->read();
 
-    char title[titleLen + 1];
-    char username[usernameLen + 1];
+    if (b1 < 0 || b2 < 0 || b3 < 0 || b4 < 0) {
+        LOG("[PhotoCenter] Error leyendo cabecera - bytes inválidos");
+        http.end();
+        isLoadingPhoto = false;
+        return;
+    }
 
-    for (int i = 0; i < titleLen; i++)
-        title[i] = stream->read();
-    for (int i = 0; i < usernameLen; i++)
-        username[i] = stream->read();
+    uint16_t titleLen = (b1 << 8) | b2;
+    uint16_t usernameLen = (b3 << 8) | b4;
+
+    // Limitar tamaño máximo para evitar stack overflow
+    const uint16_t MAX_HEADER_LEN = 128;
+    if (titleLen > MAX_HEADER_LEN || usernameLen > MAX_HEADER_LEN) {
+        LOGF("[PhotoCenter] Cabecera corrupta: titleLen=%d, usernameLen=%d", titleLen, usernameLen);
+        http.end();
+        isLoadingPhoto = false;
+        return;
+    }
+
+    char title[MAX_HEADER_LEN + 1];
+    char username[MAX_HEADER_LEN + 1];
+
+    for (int i = 0; i < titleLen; i++) {
+        int c = stream->read();
+        if (c < 0) {
+            LOG("[PhotoCenter] Error leyendo título");
+            http.end();
+            isLoadingPhoto = false;
+            return;
+        }
+        title[i] = (char)c;
+    }
+    for (int i = 0; i < usernameLen; i++) {
+        int c = stream->read();
+        if (c < 0) {
+            LOG("[PhotoCenter] Error leyendo username");
+            http.end();
+            isLoadingPhoto = false;
+            return;
+        }
+        username[i] = (char)c;
+    }
     title[titleLen] = '\0';
     username[usernameLen] = '\0';
-    
+
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
@@ -1090,32 +1212,23 @@ void showPhotoFromCenter(const String &url)
 
     // 🖼️ IMAGEN
 
-    // Reservamos el buffer de la imagen entera en RAM
+    // Usar buffer estático para evitar fragmentación de memoria
     const int width = 64;
     const int height = 64;
     const int totalPixels = width * height;
     const int totalBytes = totalPixels * 3;
 
-    uint8_t *imageBuffer = (uint8_t *)malloc(totalBytes);
-    if (!imageBuffer)
-    {
-        Serial.println("Error: no hay suficiente memoria para cargar la imagen.");
-        http.end();
-        delay(50);
-        delete client;
-        isLoadingPhoto = false;
-        return;
-    }
+    // Reset watchdog antes de lectura larga
+    esp_task_wdt_reset();
+    // Leer toda la imagen RGB888 (64x64x3) al buffer estático
+    size_t read = stream->readBytes(photoBuffer, totalBytes);
+    esp_task_wdt_reset();
+    LOGF("[PhotoCenter] Read complete, got %d bytes, heap: %d", read, ESP.getFreeHeap());
 
-    // Leer toda la imagen RGB888 (64x64x3)
-    size_t read = stream->readBytes(imageBuffer, totalBytes);
     if (read != totalBytes)
     {
-        Serial.printf("Error: se esperaban %d bytes, pero se recibieron %d\n", totalBytes, read);
-        free(imageBuffer);
+        LOGF("[Photo:showPhotoFromCenter] Error de descarga: esperados %d bytes pero recibidos %d", totalBytes, read);
         http.end();
-        delay(50);
-        delete client;
         isLoadingPhoto = false;
         return;
     }
@@ -1132,9 +1245,9 @@ void showPhotoFromCenter(const String &url)
                     if (abs(x - centerX) == radius || abs(y - centerY) == radius)
                     {
                         int index = (y * width + x) * 3;
-                        uint8_t r = imageBuffer[index + 2]; // ⚠️ BGR → RGB
-                        uint8_t g = imageBuffer[index + 0];
-                        uint8_t b = imageBuffer[index + 1];
+                        uint8_t r = photoBuffer[index + 2]; // ⚠️ BGR → RGB
+                        uint8_t g = photoBuffer[index + 0];
+                        uint8_t b = photoBuffer[index + 1];
                         uint16_t color = dma_display->color565(r, g, b);
                         drawPixelWithBuffer(x, y, color);
                     }
@@ -1145,10 +1258,14 @@ void showPhotoFromCenter(const String &url)
     }
     showPhotoInfo(String(title), String(username));
 
-    free(imageBuffer);
     http.end();
-    delay(50);
-    delete client;
+
+    // Liberar cliente SSL para dar memoria a Spotify
+    if (httpClient != nullptr) {
+        httpClient->stop();
+        delete httpClient;
+        httpClient = nullptr;
+    }
     songShowing = "";
     isLoadingPhoto = false;
 }
@@ -1156,7 +1273,7 @@ void showPhotoFromCenter(const String &url)
 void showPhotoIndex(int photoIndex)
 {
     String url = String(serverUrl) + "public/photo/get-photo-by-pixie?index=" + String(photoIndex) + "&pixieId=" + String(pixieId);
-    Serial.println("Llamando a: " + url);
+    LOGF("Llamando a: %s", url.c_str());
     showPhoto(url);
 }
 
@@ -1182,11 +1299,11 @@ void onReceiveNewPic(int id)
 void showUpdateMessage()
 {
     dma_display->clearScreen();
-    Serial.println("Se limpia pantalla");
+    LOG("Se limpia pantalla");
     dma_display->setFont();
     dma_display->setCursor(8, 50); // Centrar en el panel
     dma_display->print("Updating");
-    Serial.println("Se muestra mensaje de actualizacion");
+    LOG("Se muestra mensaje de actualizacion");
 }
 
 void showCheckMessage()
@@ -1198,27 +1315,26 @@ void checkForUpdates()
 {
     // En modo DEV, no comprobar actualizaciones
     if (DEV) {
-        Serial.println("Modo DEV activo - saltando comprobación de actualizaciones");
+        LOG("Modo DEV activo - saltando comprobación de actualizaciones");
         return;
     }
-    
+
     // Asegurar que el tiempo esté sincronizado antes de la actualización
     timeClient.update();
     time_t now = timeClient.getEpochTime();
-    Serial.println("Current time (UTC): " + String(now));
-    Serial.println("Current time (formatted): " + timeClient.getFormattedTime());
-    
+    LOGF("Current time (UTC): %lu", now);
+    LOGF("Current time (formatted): %s", timeClient.getFormattedTime().c_str());
+
     // Configurar el tiempo del sistema para URLs firmadas
     struct timeval tv;
     tv.tv_sec = now;
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
-    
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
 
-    Serial.println("Conectando a: " + String(serverUrl) + "public/version/latest");
-    http.begin(*client, String(serverUrl) + "public/version/latest");
+    ensureHttpClient();
+
+    LOGF("Conectando a: %spublic/version/latest", serverUrl);
+    http.begin(*httpClient, String(serverUrl) + "public/version/latest");
     http.setTimeout(HTTP_TIMEOUT);
     int httpCode = http.GET();
 
@@ -1231,16 +1347,15 @@ void checkForUpdates()
         {
             int latestVersion = doc["version"];
             String updateUrl = doc["url"].as<String>();
-            Serial.println("Latest version: " + String(latestVersion));
-            Serial.println("Update URL: " + updateUrl);
+            LOGF("Latest version: %d", latestVersion);
+            LOGF("Update URL: %s", updateUrl.c_str());
 
             if (latestVersion > currentVersion)
             {
-                Serial.printf("New version available: %d\n", latestVersion);
+                LOGF("New version available: %d", latestVersion);
                 showUpdateMessage();
-                Serial.println("Downloading update...");
+                LOG("Downloading update...");
                 http.end();
-                delete client;
                 
                 // Detectar si la URL es HTTP o HTTPS y crear el cliente apropiado
                 WiFiClient *updateClient;
@@ -1265,78 +1380,82 @@ void checkForUpdates()
                                       {
             int percent = (written * 100) / total;
             showPercetage(percent);
-            Serial.printf("Progreso: %d%% (%d/%d bytes)\n", percent, written, total); });
+            LOGF("Progreso: %d%% (%d/%d bytes)", percent, written, total); });
 
                     if (Update.begin(contentLength))
                     {
                         size_t written = Update.writeStream(*updateStream);
                         if (written == contentLength)
                         {
-                            Serial.println("Update successfully written.");
+                            LOG("[OTA:checkForUpdates] Firmware escrito correctamente");
                             if (Update.end())
                             {
-                                Serial.println("Update successfully completed.");
+                                LOG("[OTA:checkForUpdates] Actualización completada exitosamente");
                                 // TODO: Guardar la nueva version
                                 preferences.putInt("currentVersion", latestVersion);
                                 ESP.restart();
                             }
                             else
                             {
-                                Serial.printf("Update failed. Error: %s\n", Update.errorString());
+                                LOGF("[OTA:checkForUpdates] Error al finalizar Update: %s", Update.errorString());
                             }
                         }
                         else
                         {
-                            Serial.printf("Update failed. Written only: %d/%d\n", written, contentLength);
+                            LOGF("[OTA:checkForUpdates] Error de escritura: solo %d/%d bytes escritos", written, contentLength);
                         }
                     }
                     else
                     {
-                        Serial.println("Not enough space for update.");
+                        LOG("[OTA:checkForUpdates] Error: espacio insuficiente para actualización");
                     }
                 }
                 else
                 {
-                    Serial.printf("Failed to download update. HTTP code: %d\n", updateHttpCode);
+                    LOGF("[OTA:checkForUpdates] Error HTTP al descargar firmware: %d", updateHttpCode);
                     if (updateHttpCode == 404) {
-                        Serial.println("Update file not found or URL expired. Retrying in next check...");
+                        LOG("[OTA:checkForUpdates] Archivo no encontrado o URL expirada");
                     }
                     // Imprimir la respuesta para debug
                     String response = updateHttp.getString();
-                    Serial.println("Response body: " + response);
+                    LOGF("[OTA:checkForUpdates] Respuesta del servidor: %s", response.c_str());
                 }
                 updateHttp.end();
                 delete updateClient;
             }
             else
             {
-                Serial.println("No new updates available.");
+                LOG("No new updates available.");
             }
         }
         else
         {
-            Serial.print("Error parsing JSON: ");
-            Serial.println(error.c_str());
+            LOGF("[OTA:checkForUpdates] Error parseando JSON de versión: %s", error.c_str());
         }
     }
     else
     {
-        Serial.printf("Failed to check for updates. HTTP code: %d\n", httpCode);
+        LOGF("[OTA:checkForUpdates] Error HTTP al verificar actualizaciones: %d", httpCode);
     }
+
     http.end();
-    delay(50);
-    delete client;
+
+    // Liberar cliente SSL para recuperar memoria
+    if (httpClient != nullptr) {
+        httpClient->stop();
+        delete httpClient;
+        httpClient = nullptr;
+    }
 }
 
 void registerPixie()
 {
-    WiFiClient *client = getWiFiClient();
-    HTTPClient http;
+    ensureHttpClient();
 
     String macAddress = WiFi.macAddress();
-    Serial.println("Registering Pixie with MAC: " + macAddress);
+    LOGF("Registering Pixie with MAC: %s", macAddress.c_str());
 
-    http.begin(*client, String(serverUrl) + "public/pixie/add");
+    http.begin(*httpClient, String(serverUrl) + "public/pixie/add");
     http.setTimeout(HTTP_TIMEOUT);
     http.addHeader("Content-Type", "application/json");
 
@@ -1358,21 +1477,26 @@ void registerPixie()
             String activationCode = responseDoc["code"].as<String>();
             preferences.putInt("pixieId", pixieId);
             preferences.putString("code", activationCode);
-            Serial.printf("Pixie registered with ID: %d and code: %s\n", pixieId, activationCode.c_str());
+            LOGF("Pixie registered with ID: %d and code: %s", pixieId, activationCode.c_str());
         }
         else
         {
-            Serial.print("Error parsing JSON: ");
-            Serial.println(error.c_str());
+            LOGF("[Pixie:registerPixie] Error parseando JSON de registro: %s", error.c_str());
         }
     }
     else
     {
-        Serial.printf("Failed to register Pixie. HTTP code: %d\n", httpCode);
+        LOGF("[Pixie:registerPixie] Error HTTP al registrar dispositivo: %d", httpCode);
     }
+
     http.end();
-    delay(50);
-    delete client;
+
+    // Liberar cliente SSL para recuperar memoria
+    if (httpClient != nullptr) {
+        httpClient->stop();
+        delete httpClient;
+        httpClient = nullptr;
+    }
 }
 
 // Función para reiniciar todas las preferencias a valores de fábrica
@@ -1391,7 +1515,7 @@ void testInit()
     preferences.putString("password", "");
     preferences.putBool("allowSpotify", false);
     preferences.putString("code", "0000"); // Inicializar el código de activación vacío
-    Serial.println("Preferencias reiniciadas a valores de fábrica");
+    LOG("Preferencias reiniciadas a valores de fábrica");
 }
 
 // Función para mostrar el SSID y contraseña en el panel
@@ -1426,8 +1550,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     message[length] = '\0';
 
     // Imprimir el mensaje
-    Serial.println("Mensaje recibido en el topic: " + String(topic));
-    Serial.println("Mensaje: " + String(message));
+    LOGF("Mensaje recibido en el topic: %s", topic);
+    LOGF("Mensaje: %s", message);
 
     // Crear un documento JSON
     JsonDocument doc;
@@ -1440,7 +1564,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         {
             if (strcmp(action, "update_photo") == 0)
             {
-                Serial.println("Se recibio una nueva foto por MQTT");
+                LOG("Se recibio una nueva foto por MQTT");
                 int id = doc["id"];
                 onReceiveNewPic(id);
             }
@@ -1451,15 +1575,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             else if (strcmp(action, "update_bin") == 0)
             {
                 if (DEV) {
-                    Serial.println("Comando de actualización recibido por MQTT - ignorado en modo DEV");
+                    LOG("Comando de actualización recibido por MQTT - ignorado en modo DEV");
                 } else {
-                    Serial.println("Se recibio una actualizacion de binario por MQTT");
+                    LOG("Se recibio una actualizacion de binario por MQTT");
                     checkForUpdates();
                 }
             }
             else if (strcmp(action, "factory_reset") == 0)
             {
-                Serial.println("Factory reset recibido via MQTT");
+                LOG("Factory reset recibido via MQTT");
                 dma_display->clearScreen();
                 showLoadingMsg("Factory Reset...");
                 delay(2000);
@@ -1468,7 +1592,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             }
             else if (strcmp(action, "reset_env_vars") == 0)
             {
-                Serial.println("Reset de variables de entorno recibido via MQTT");
+                LOG("Reset de variables de entorno recibido via MQTT");
                 dma_display->clearScreen();
                 showLoadingMsg("Resetting Env Vars...");
                 delay(1000);
@@ -1507,19 +1631,19 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             // ===== HANDLERS DE DIBUJO =====
             else if (strcmp(action, "enter_draw_mode") == 0)
             {
-                Serial.println("Entrando en modo dibujo via MQTT");
+                LOG("Entrando en modo dibujo via MQTT");
                 enterDrawingMode();
             }
             else if (strcmp(action, "exit_draw_mode") == 0)
             {
-                Serial.println("Saliendo del modo dibujo via MQTT");
+                LOG("Saliendo del modo dibujo via MQTT");
                 exitDrawingMode();
             }
             else if (strcmp(action, "draw_pixel") == 0)
             {
                 // Auto-entrar en modo dibujo si no está activo
                 if (!drawingMode) {
-                    Serial.println("Auto-activando modo dibujo para draw_pixel");
+                    LOG("Auto-activando modo dibujo para draw_pixel");
                     enterDrawingMode();
                 }
                 
@@ -1558,7 +1682,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             {
                 // Auto-entrar en modo dibujo si no está activo
                 if (!drawingMode) {
-                    Serial.println("Auto-activando modo dibujo para clear_canvas");
+                    LOG("Auto-activando modo dibujo para clear_canvas");
                     enterDrawingMode();
                 }
                 
@@ -1577,62 +1701,54 @@ void mqttReconnect()
 
     while (!mqttClient.connected() && retryCount < MQTT_MAX_RETRIES)
     {
-        Serial.print("Intentando conexión MQTT (intento ");
-        Serial.print(retryCount + 1);
-        Serial.print("/");
-        Serial.print(MQTT_MAX_RETRIES);
-        Serial.print(") a ");
-        Serial.print(MQTT_BROKER_URL);
-        Serial.print(":");
-        Serial.print(MQTT_BROKER_PORT);
-        Serial.println("...");
+        LOGF("[MQTT:mqttReconnect] Intentando conexión (intento %d/%d) a %s:%d...",
+                      retryCount + 1, MQTT_MAX_RETRIES, MQTT_BROKER_URL, MQTT_BROKER_PORT);
 
         String clientId = String(MQTT_CLIENT_ID) + String(pixieId);
 
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
         {
-            Serial.println("MQTT conectado exitosamente!");
+            LOG("[MQTT:mqttReconnect] Conectado exitosamente");
             String topic = String("pixie/") + String(pixieId);
-            Serial.println("Suscribiendo al tema: " + topic);
+            LOGF("[MQTT:mqttReconnect] Suscribiendo al tema: %s", topic.c_str());
             if (mqttClient.subscribe(topic.c_str())) {
-                Serial.println("Suscripción exitosa");
+                LOG("[MQTT:mqttReconnect] Suscripción exitosa");
                 loadingMsg = "";
             } else {
-                Serial.println("Error en la suscripción");
+                LOG("[MQTT:mqttReconnect] Error: fallo en suscripción al tema");
             }
             return;  // Conexión exitosa
         }
         else
         {
-            Serial.print("MQTT falló, rc=");
-            Serial.print(mqttClient.state());
-            Serial.print(" (");
+            const char* stateStr;
             switch(mqttClient.state()) {
-                case -4: Serial.print("MQTT_CONNECTION_TIMEOUT"); break;
-                case -3: Serial.print("MQTT_CONNECTION_LOST"); break;
-                case -2: Serial.print("MQTT_CONNECT_FAILED"); break;
-                case -1: Serial.print("MQTT_DISCONNECTED"); break;
-                case 0: Serial.print("MQTT_CONNECTED"); break;
-                case 1: Serial.print("MQTT_CONNECT_BAD_PROTOCOL"); break;
-                case 2: Serial.print("MQTT_CONNECT_BAD_CLIENT_ID"); break;
-                case 3: Serial.print("MQTT_CONNECT_UNAVAILABLE"); break;
-                case 4: Serial.print("MQTT_CONNECT_BAD_CREDENTIALS"); break;
-                case 5: Serial.print("MQTT_CONNECT_UNAUTHORIZED"); break;
+                case -4: stateStr = "CONNECTION_TIMEOUT"; break;
+                case -3: stateStr = "CONNECTION_LOST"; break;
+                case -2: stateStr = "CONNECT_FAILED"; break;
+                case -1: stateStr = "DISCONNECTED"; break;
+                case 0: stateStr = "CONNECTED"; break;
+                case 1: stateStr = "BAD_PROTOCOL"; break;
+                case 2: stateStr = "BAD_CLIENT_ID"; break;
+                case 3: stateStr = "UNAVAILABLE"; break;
+                case 4: stateStr = "BAD_CREDENTIALS"; break;
+                case 5: stateStr = "UNAUTHORIZED"; break;
+                default: stateStr = "UNKNOWN"; break;
             }
-            Serial.println(")");
+            LOGF("[MQTT:mqttReconnect] Error de conexión, código=%d (%s)", mqttClient.state(), stateStr);
             retryCount++;
             if (retryCount < MQTT_MAX_RETRIES) {
-                Serial.printf("Reintentando en %d ms...\n", MQTT_RETRY_DELAY);
-                delay(MQTT_RETRY_DELAY);
+                LOGF("[MQTT:mqttReconnect] Reintentando en %d ms...", MQTT_RETRY_DELAY);
+                wait(MQTT_RETRY_DELAY);
             }
         }
     }
 
     if (!mqttClient.connected()) {
-        Serial.println("MQTT: Max reintentos alcanzado - reiniciando ESP32...");
+        LOG("[MQTT:mqttReconnect] Error crítico: máximo de reintentos alcanzado - reiniciando ESP32");
         dma_display->clearScreen();
         showLoadingMsg("MQTT Error");
-        delay(3000);
+        wait(3000);
         ESP.restart();
     }
 }
@@ -1704,7 +1820,7 @@ button:hover{background:#45a049}
 
 // Función para manejar el escaneo de redes WiFi
 void handleWifiScan() {
-    Serial.println("Scanning WiFi networks...");
+    LOG("Scanning WiFi networks...");
     int networkCount = WiFi.scanNetworks();
     
     String html = R"(<!DOCTYPE html>
@@ -1957,21 +2073,20 @@ void setupWebServer() {
     webServer.on("/status", HTTP_GET, handleConnectionStatus);
     
     webServer.begin();
-    Serial.println("Web server started on http://192.168.4.1");
+    LOG("Web server started on http://192.168.4.1");
 }
 
 // Función para iniciar el modo AP
 void startAPMode() {
     apMode = true;
     WiFi.mode(WIFI_AP);
-    WiFi.softAP("MinimalFrame", "12345678");
+    WiFi.softAP("frame.", "12345678");
     
     IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(IP);
+    LOGF("AP IP address: %s", IP.toString().c_str());
     
     setupWebServer();
-    showAPCredentials("MinimalFrame", "12345678");
+    showAPCredentials("frame.", "12345678");
 }
 
 // Función para procesar las credenciales recibidas por Serial
@@ -2044,7 +2159,7 @@ void showActivationCode(String code) {
 
 void checkActivation() {
     String currentCode = preferences.getString("code", "0000");
-    Serial.println("Código de activación: " + currentCode);
+    LOGF("Código de activación: %s", currentCode.c_str());
 
     if (currentCode != "0000")
     {
@@ -2061,7 +2176,7 @@ void checkActivation() {
             attempts++;
 
             if (attempts % 10 == 0) {
-                Serial.printf("Esperando activación... (%lu segundos)\n",
+                LOGF("Esperando activación... (%lu segundos)",
                               (millis() - startTime) / 1000);
             }
             delay(2000);
@@ -2071,13 +2186,13 @@ void checkActivation() {
         if (currentCode == "0000")
         {
             showLoadingMsg("Activated!");
-            Serial.println("Dispositivo activado correctamente");
+            LOG("Dispositivo activado correctamente");
             delay(2000);
         }
         else
         {
             showLoadingMsg("Timeout");
-            Serial.println("Timeout de activación - reiniciando ESP32...");
+            LOG("Timeout de activación - reiniciando ESP32...");
             delay(2000);
             ESP.restart();
         }
@@ -2087,10 +2202,10 @@ void checkActivation() {
 // Función para resetear las variables de entorno al inicio
 void resetEnvironmentVariables() {
     if (AUTO_RESET_ON_STARTUP) {
-        Serial.println("==========================================");
-        Serial.println("        RESETEO AUTOMÁTICO ACTIVADO      ");
-        Serial.println("==========================================");
-        Serial.println("Reseteando variables de entorno...");
+        LOG("==========================================");
+        LOG("        RESETEO AUTOMÁTICO ACTIVADO      ");
+        LOG("==========================================");
+        LOG("Reseteando variables de entorno...");
         
         // Limpiar todas las preferencias guardadas
         preferences.begin("wifi", false);
@@ -2119,8 +2234,8 @@ void resetEnvironmentVariables() {
         currentVersion = 0;
         pixieId = 0;
         
-        Serial.println("Variables de entorno reseteadas exitosamente!");
-        Serial.println("==========================================");
+        LOG("Variables de entorno reseteadas exitosamente!");
+        LOG("==========================================");
     }
 }
 
@@ -2133,21 +2248,21 @@ void setup()
     
     // Mostrar información del modo de desarrollo
     if (DEV) {
-        Serial.println("==========================================");
-        Serial.println("           MODO DESARROLLO ACTIVO        ");
-        Serial.println("==========================================");
-        Serial.println("- Servidor: " + String(serverUrl));
-        Serial.println("- Actualizaciones OTA: DESHABILITADAS");
-        Serial.println("- Seguridad TLS: DESHABILITADA");
-        Serial.println("==========================================");
+        LOG("==========================================");
+        LOG("           MODO DESARROLLO ACTIVO        ");
+        LOG("==========================================");
+        LOGF("- Servidor: %s", serverUrl);
+        LOG("- Actualizaciones OTA: DESHABILITADAS");
+        LOG("- Seguridad TLS: DESHABILITADA");
+        LOG("==========================================");
     } else {
-        Serial.println("==========================================");
-        Serial.println("           MODO PRODUCCIÓN ACTIVO        ");
-        Serial.println("==========================================");
-        Serial.println("- Servidor: " + String(serverUrl));
-        Serial.println("- Actualizaciones OTA: HABILITADAS");
-        Serial.println("- Seguridad TLS: HABILITADA");
-        Serial.println("==========================================");
+        LOG("==========================================");
+        LOG("           MODO PRODUCCIÓN ACTIVO        ");
+        LOG("==========================================");
+        LOGF("- Servidor: %s", serverUrl);
+        LOG("- Actualizaciones OTA: HABILITADAS");
+        LOG("- Seguridad TLS: HABILITADA");
+        LOG("==========================================");
     }
 
     // Configuración del panel
@@ -2173,13 +2288,13 @@ void setup()
 
     // Si no hay credenciales guardadas, iniciar modo AP
     if (storedSSID == "") {
-        Serial.println("No WiFi credentials found. Starting AP mode...");
+        LOG("No WiFi credentials found. Starting AP mode...");
         startAPMode();
         return; // Sale del setup, el modo AP seguirá corriendo en el loop
     }
 
     // Intentar conectar a WiFi
-    Serial.println("Conectando a WiFi...");
+    LOG("Conectando a WiFi...");
     WiFi.mode(WIFI_STA);
     WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
 
@@ -2194,11 +2309,11 @@ void setup()
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Failed to connect to WiFi. Starting AP mode...");
+        LOG("Failed to connect to WiFi. Starting AP mode...");
         startAPMode();
         return; // Sale del setup, el modo AP seguirá corriendo en el loop
     } else {
-        Serial.println("OK");
+        LOG("WiFi connected OK");
         showLoadingMsg("Connected to WiFi");
 
         // Configuración de MQTT (sin TLS para puerto 1883)
@@ -2216,29 +2331,32 @@ void setup()
             type = "sketch";
         else
             type = "filesystem";
-        Serial.println("Inicio de actualización OTA: " + type);
+        LOGF("Inicio de actualización OTA: %s", type.c_str());
         dma_display->clearScreen();
         showPercetage(0);
     });
     ArduinoOTA.onEnd([]() {
-        Serial.println("\nActualización OTA completada.");
+        LOG("Actualización OTA completada.");
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("Progreso: %u%%\n", (progress / (total / 100)));
+        LOGF("Progreso OTA: %u%%", (progress / (total / 100)));
         showPercetage((progress / (total / 100)));
     });
     ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("Error [%u]: ", error);
+        const char* errorStr;
         if (error == OTA_AUTH_ERROR)
-            Serial.println("Error de autenticación");
+            errorStr = "AUTH_ERROR: Fallo de autenticación";
         else if (error == OTA_BEGIN_ERROR)
-            Serial.println("Error al iniciar");
+            errorStr = "BEGIN_ERROR: Error al iniciar actualización";
         else if (error == OTA_CONNECT_ERROR)
-            Serial.println("Error de conexión");
+            errorStr = "CONNECT_ERROR: Error de conexión con cliente OTA";
         else if (error == OTA_RECEIVE_ERROR)
-            Serial.println("Error al recibir");
+            errorStr = "RECEIVE_ERROR: Error al recibir datos de firmware";
         else if (error == OTA_END_ERROR)
-            Serial.println("Error al finalizar");
+            errorStr = "END_ERROR: Error al finalizar escritura de firmware";
+        else
+            errorStr = "UNKNOWN_ERROR";
+        LOGF("[ArduinoOTA:onError] Código de error: %u - %s", error, errorStr);
     });
     ArduinoOTA.begin();
 
@@ -2251,7 +2369,7 @@ void setup()
     if (!DEV) {
         checkForUpdates();
     } else {
-        Serial.println("Modo DEV activo - saltando comprobación inicial de actualizaciones");
+        LOG("Modo DEV activo - saltando comprobación inicial de actualizaciones");
     }
 
     // Register Pixie if not registered
@@ -2271,7 +2389,7 @@ void setup()
     // Inicializar Watchdog Timer
     esp_task_wdt_init(WDT_TIMEOUT, true);
     esp_task_wdt_add(NULL);
-    Serial.println("Watchdog timer inicializado");
+    LOG("Watchdog timer inicializado");
 
     showLoadingMsg("Ready!");
 }
@@ -2289,7 +2407,7 @@ void loop()
         // Refrescar la pantalla cada 5 segundos para mantener visible la información
         static unsigned long lastRefresh = 0;
         if (millis() - lastRefresh > 5000) {
-            showAPCredentials("MinimalFrame", "12345678");
+            showAPCredentials("frame.", "12345678");
             lastRefresh = millis();
         }
         
@@ -2328,8 +2446,12 @@ void loop()
             lastSpotifyCheck = millis();
         }
         if (songOnline == "" || songOnline == "null") {
-            if (millis() - lastPhotoChange >= secsPhotos) {
+            // Si antes había canción y ahora no, mostrar foto inmediatamente
+            if (songShowing != "") {
                 songShowing = "";
+                lastPhotoChange = 0;  // Forzar cambio de foto inmediato
+            }
+            if (millis() - lastPhotoChange >= secsPhotos) {
                 showPhotoIndex(photoIndex++);
                 lastPhotoChange = millis();
                 if (photoIndex >= maxPhotos) {
@@ -2337,7 +2459,6 @@ void loop()
                 }
             }
         } else {
-            lastPhotoChange = -secsPhotos;
             if (songShowing != songOnline) {
                 songShowing = songOnline;
                 fetchAndDrawCover();
