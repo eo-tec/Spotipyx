@@ -60,8 +60,8 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = false;
-const char *serverUrl = DEV ? "http://192.168.18.53:3000/" : "https://api.mypixelframe.com/";
+const bool DEV = true;
+const char *serverUrl = DEV ? "http://192.168.18.147:3000/" : "https://api.mypixelframe.com/";
 
 // Variable para controlar el reset automático al arrancar
 const bool AUTO_RESET_ON_STARTUP = false; // Cambiar a false para deshabilitar el reset automático
@@ -132,10 +132,7 @@ bool apMode = false; // Se activará si no hay credenciales guardadas
 bool allowSpotify = true;
 WebServer webServer(80); // Servidor web para configuración WiFi
 
-// getWiFiClient() eliminado - ahora usamos clientes estáticos reutilizables:
-// - spotifyClient para Spotify
-// - httpClient para fotos
-// - httpClient para API general (getPixie, registerPixie, checkForUpdates)
+// Cliente HTTP reutilizable para API (getPixie, registerPixie, OTA download)
 
 void wait(int ms)
 {
@@ -454,24 +451,21 @@ static char httpBuffer[512];
 // Buffer estático para fotos (evita fragmentación de memoria)
 static uint8_t photoBuffer[64 * 64 * 3];  // 12288 bytes para imagen RGB888
 
-// Cliente WiFi reutilizable para Spotify (evita fragmentación)
-static WiFiClientSecure *spotifyClient = nullptr;
-static HTTPClient spotifyHttp;
+// Variables para metadata de foto (MQTT)
+static char photoTitle[64];
+static char photoAuthor[64];
 
-// Cliente WiFi reutilizable para HTTP general (fotos, API, etc.)
+// Flags de respuesta MQTT (para patrón request/response)
+volatile bool mqttResponseReceived = false;
+volatile bool mqttResponseSuccess = false;
+String mqttResponseType = "";
+
+// Forward declaration para función de espera MQTT
+bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000);
+
+// Cliente WiFi reutilizable para HTTP (getPixie, registerPixie, OTA download)
 static WiFiClientSecure *httpClient = nullptr;
 static HTTPClient http;
-
-void ensureSpotifyClient() {
-    // Siempre crear cliente nuevo para evitar memory leaks de mbedTLS
-    // Los buffers SSL (~40KB) deben liberarse entre conexiones
-    if (spotifyClient != nullptr) {
-        spotifyClient->stop();
-        delete spotifyClient;
-    }
-    spotifyClient = new WiFiClientSecure();
-    spotifyClient->setInsecure();
-}
 
 void ensureHttpClient() {
     // Solo crear cliente si no existe - evitar new/delete constantes
@@ -484,52 +478,27 @@ void ensureHttpClient() {
     }
 }
 
-// Función para descargar y mostrar la portada
+// Función para descargar y mostrar la portada (via MQTT)
 void fetchAndDrawCover()
 {
     lastPhotoChange = millis();
-    ensureSpotifyClient();
 
-    LOG("[Spotify] Fetching cover...");
-
+    LOG("[Spotify] Fetching cover via MQTT...");
     esp_task_wdt_reset();  // Reset watchdog antes de operación larga
 
-    // Construir URL en buffer estático
-    snprintf(httpBuffer, sizeof(httpBuffer), "%spublic/spotify/cover-64x64-binary?pixie_id=%d", serverUrl, pixieId);
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/cover";
+    String payload = "{\"songId\":\"" + songShowing + "\"}";
+    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+        LOG("[Spotify] Error publicando request MQTT");
+        showTime();
+        LOG("[Spotify] Done");
+        return;
+    }
 
-    LOG("[Spotify] HTTP begin");
-    spotifyHttp.begin(*spotifyClient, httpBuffer);
-    spotifyHttp.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
-
-    LOG("[Spotify] HTTP GET start");
-    int httpCode = spotifyHttp.GET();
-    LOGF("[Spotify] HTTP GET done, code: %d", httpCode);
-
-    esp_task_wdt_reset();  // Reset watchdog después de GET
-
-    if (httpCode == 200)
-    {
-        WiFiClient *stream = spotifyHttp.getStreamPtr();
-
-        const int totalBytes = 64 * 64 * 2;
-        LOGF("[Spotify] Reading %d bytes", totalBytes);
-        size_t totalReceived = stream->readBytes(spotifyCoverBuffer, totalBytes);
-        LOGF("[Spotify] Read complete, got %d bytes", totalReceived);
-
-        esp_task_wdt_reset();  // Reset watchdog después de descarga
-
-        if (totalReceived != totalBytes)
-        {
-            LOGF("[Spotify] Error: esperados %d bytes pero recibidos %d", totalBytes, totalReceived);
-            spotifyHttp.end();
-            // Liberar cliente SSL para recuperar ~40KB de memoria
-            if (spotifyClient != nullptr) {
-                spotifyClient->stop();
-                delete spotifyClient;
-                spotifyClient = nullptr;
-            }
-            return;
-        }
+    // Esperar respuesta
+    if (waitForMqttResponse("cover", 15000)) {
+        esp_task_wdt_reset();  // Reset watchdog después de recibir
 
         LOG("[Spotify] Animation start");
         // Mostrar la imagen con animación push up
@@ -567,80 +536,35 @@ void fetchAndDrawCover()
     }
     else
     {
-        LOGF("[Spotify] Error HTTP: %d", httpCode);
+        LOG("[Spotify] Error recibiendo cover via MQTT");
         showTime();
     }
-    spotifyHttp.end();
 
-    // Liberar cliente SSL para recuperar ~40KB de memoria
-    if (spotifyClient != nullptr) {
-        spotifyClient->stop();
-        delete spotifyClient;
-        spotifyClient = nullptr;
-    }
     LOG("[Spotify] Done");
 }
 
-// Función para obtener el ID de la canción en reproducción
+// Función para obtener el ID de la canción en reproducción (via MQTT)
 String fetchSongId()
 {
-    ensureSpotifyClient();
-
-    // Construir URL en buffer estático
-    snprintf(httpBuffer, sizeof(httpBuffer), "%spublic/spotify/id-playing?pixie_id=%d", serverUrl, pixieId);
-
-    spotifyHttp.begin(*spotifyClient, httpBuffer);
-    spotifyHttp.setTimeout(HTTP_TIMEOUT);
-    int httpCode = spotifyHttp.GET();
-
     songIdBuffer[0] = '\0';  // Limpiar buffer
 
-    if (httpCode == 200)
-    {
-        // Leer directamente en buffer estático
-        WiFiClient *stream = spotifyHttp.getStreamPtr();
-        int len = spotifyHttp.getSize();
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/song";
+    if (!mqttClient.publish(topic.c_str(), "{}")) {
+        LOG("[Spotify:fetchSongId] Error publicando request MQTT");
+        return "";
+    }
 
-        if (len > 0 && len < (int)sizeof(httpBuffer)) {
-            int bytesRead = stream->readBytes(httpBuffer, min(len, (int)sizeof(httpBuffer) - 1));
-            httpBuffer[bytesRead] = '\0';
-
-            // Parseo manual simple para extraer el id
-            char *idStart = strstr(httpBuffer, "\"id\":\"");
-            if (idStart) {
-                idStart += 6;
-                char *idEnd = strchr(idStart, '"');
-                if (idEnd && (idEnd - idStart) < 63) {
-                    int idLen = idEnd - idStart;
-                    strncpy(songIdBuffer, idStart, idLen);
-                    songIdBuffer[idLen] = '\0';
-                    // Solo log si es una canción diferente
-                    if (songShowing != String(songIdBuffer)) {
-                        LOGF("Nueva canción: %s", songIdBuffer);
-                    }
-                }
-            }
+    // Esperar respuesta
+    if (waitForMqttResponse("song", 5000)) {
+        // Solo log si es una canción diferente
+        if (songIdBuffer[0] != '\0' && songShowing != String(songIdBuffer)) {
+            LOGF("Nueva canción: %s", songIdBuffer);
         }
-
-    }
-    else if (httpCode > 0)
-    {
-        LOGF("[Spotify:fetchSongId] Error HTTP al obtener ID canción: %d", httpCode);
-    }
-    else
-    {
-        LOGF("[Spotify:fetchSongId] Error de conexión: %s", spotifyHttp.errorToString(httpCode).c_str());
+        return String(songIdBuffer);
     }
 
-    spotifyHttp.end();
-
-    // Liberar cliente SSL para recuperar ~40KB de memoria
-    if (spotifyClient != nullptr) {
-        spotifyClient->stop();
-        delete spotifyClient;
-        spotifyClient = nullptr;
-    }
-    return String(songIdBuffer);
+    return "";
 }
 
 // Funciones de fade in/out (ya existentes)
@@ -695,54 +619,23 @@ void fadeIn()
     }
 }
 
-void getPixie()
+// Función para solicitar configuración via MQTT
+void requestConfig()
 {
-    ensureHttpClient();
+    LOG("[Config] Solicitando configuración via MQTT...");
 
-    LOG("Fetching Pixie details...");
-
-    http.begin(*httpClient, String(serverUrl) + "public/pixie/?id=" + String(pixieId));
-    http.setTimeout(HTTP_TIMEOUT);
-    int httpCode = http.GET();
-
-    if (httpCode == 200)
-    {
-        JsonDocument doc;
-        delay(250);                    // Puede ayudar
-        DeserializationError error = deserializeJson(doc, http.getStream());
-        LOGF("Code: %s", doc["pixie"]["code"].as<String>().c_str());
-        if (!error)
-        {
-            brightness = doc["pixie"]["brightness"];
-            dma_display->setBrightness(max(brightness, 10));
-            preferences.putInt("brightness", brightness);
-            maxPhotos = doc["pixie"]["pictures_on_queue"];
-            allowSpotify = doc["pixie"]["spotify_enabled"];
-            preferences.putInt("maxPhotos", maxPhotos);
-            preferences.putBool("allowSpotify", allowSpotify);
-            int secsBetweenPhotos = doc["pixie"]["secs_between_photos"];
-            secsPhotos = secsBetweenPhotos * 1000; // Convertir a milisegundos
-            preferences.putUInt("secsPhotos", secsPhotos);
-            activationCode = doc["pixie"]["code"].as<String>();
-            preferences.putString("code", activationCode);
-        }
-        else
-        {
-            LOGF("[Pixie:getPixie] Error parseando JSON: %s", error.c_str());
-        }
-    }
-    else
-    {
-        LOGF("[Pixie:getPixie] Error HTTP al obtener detalles: %d", httpCode);
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/config";
+    if (!mqttClient.publish(topic.c_str(), "{}")) {
+        LOG("[Config] Error publicando request MQTT");
+        return;
     }
 
-    http.end();
-
-    // Liberar cliente SSL para recuperar memoria
-    if (httpClient != nullptr) {
-        httpClient->stop();
-        delete httpClient;
-        httpClient = nullptr;
+    // Esperar respuesta
+    if (waitForMqttResponse("config", 10000)) {
+        LOG("[Config] Configuración aplicada correctamente");
+    } else {
+        LOG("[Config] Error recibiendo configuración via MQTT");
     }
 }
 
@@ -962,109 +855,9 @@ void showPhotoInfo(String title, String name)
     }
 }
 
-void showPhoto(String url)
+// Función auxiliar para mostrar foto desde photoBuffer (ya descargada via MQTT)
+void displayPhotoWithFade()
 {
-    // Evitar condiciones de carrera
-    if (isLoadingPhoto) {
-        LOG("Ya hay una foto cargándose, ignorando petición");
-        return;
-    }
-    isLoadingPhoto = true;
-
-    LOGF("[Photo] Heap libre: %d bytes", ESP.getFreeHeap());
-
-    ensureHttpClient();
-
-    LOGF("Conectando a: %s", url.c_str());
-    http.begin(*httpClient, url);
-    http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
-
-    int httpCode = http.GET();
-    LOGF("[Photo] HTTP GET done, code: %d, heap: %d", httpCode, ESP.getFreeHeap());
-
-    if (httpCode != 200)
-    {
-        LOGF("[Photo:showPhoto] Error HTTP al descargar foto: %d (URL: %s)", httpCode, url.c_str());
-        http.end();
-        if (httpCode < 0 && httpClient != nullptr) {
-            LOG("[Photo] Error de conexión - cerrando cliente");
-            httpClient->stop();
-        }
-        isLoadingPhoto = false;
-        return;
-    }
-
-    WiFiClient *stream = http.getStreamPtr();
-
-    // Leer cabecera con validación de errores
-    int b1 = stream->read();
-    int b2 = stream->read();
-    int b3 = stream->read();
-    int b4 = stream->read();
-
-    if (b1 < 0 || b2 < 0 || b3 < 0 || b4 < 0) {
-        LOG("[Photo] Error leyendo cabecera - bytes inválidos");
-        http.end();
-        isLoadingPhoto = false;
-        return;
-    }
-
-    uint16_t titleLen = (b1 << 8) | b2;
-    uint16_t usernameLen = (b3 << 8) | b4;
-
-    // Limitar tamaño máximo para evitar stack overflow
-    const uint16_t MAX_HEADER_LEN = 128;
-    if (titleLen > MAX_HEADER_LEN || usernameLen > MAX_HEADER_LEN) {
-        LOGF("[Photo] Cabecera corrupta: titleLen=%d, usernameLen=%d", titleLen, usernameLen);
-        http.end();
-        isLoadingPhoto = false;
-        return;
-    }
-
-    char title[MAX_HEADER_LEN + 1];
-    char username[MAX_HEADER_LEN + 1];
-
-    for (int i = 0; i < titleLen; i++) {
-        int c = stream->read();
-        if (c < 0) {
-            LOG("[Photo] Error leyendo título");
-            http.end();
-            isLoadingPhoto = false;
-            return;
-        }
-        title[i] = (char)c;
-    }
-    for (int i = 0; i < usernameLen; i++) {
-        int c = stream->read();
-        if (c < 0) {
-            LOG("[Photo] Error leyendo username");
-            http.end();
-            isLoadingPhoto = false;
-            return;
-        }
-        username[i] = (char)c;
-    }
-    title[titleLen] = '\0';
-    username[usernameLen] = '\0';
-
-    // Usar buffer estático para evitar fragmentación de memoria
-    const int totalBytes = 64 * 64 * 3;
-
-    // Reset watchdog antes de lectura larga
-    esp_task_wdt_reset();
-    size_t received = stream->readBytes(photoBuffer, totalBytes);
-    esp_task_wdt_reset();
-    LOGF("[Photo] Read complete, got %d bytes, heap: %d", received, ESP.getFreeHeap());
-
-    // Validar que se recibió la imagen completa
-    if (received != totalBytes)
-    {
-        LOGF("[Photo:showPhoto] Error de descarga: esperados %d bytes pero recibidos %d - DESCARTANDO imagen", totalBytes, received);
-        http.end();
-        isLoadingPhoto = false;
-        return;
-    }
-
     // Solo hacer fadeOut DESPUÉS de confirmar que la imagen está completa
     fadeOut();
     dma_display->clearScreen();
@@ -1072,7 +865,7 @@ void showPhoto(String url)
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
-    // Copiar al screenBuffer desde el buffer estático validado
+    // Copiar al screenBuffer desde el buffer estático
     for (int y = 0; y < 64; y++)
     {
         for (int x = 0; x < 64; x++)
@@ -1086,20 +879,11 @@ void showPhoto(String url)
     }
 
     fadeIn();
-    showPhotoInfo(String(title), String(username));
-
-    http.end();
-
-    // Liberar cliente SSL para dar memoria a Spotify
-    if (httpClient != nullptr) {
-        httpClient->stop();
-        delete httpClient;
-        httpClient = nullptr;
-    }
-    isLoadingPhoto = false;
+    showPhotoInfo(String(photoTitle), String(photoAuthor));
 }
 
-void showPhotoFromCenter(const String &url)
+// Función para mostrar foto por índice (via MQTT)
+void showPhoto(int index)
 {
     // Evitar condiciones de carrera
     if (isLoadingPhoto) {
@@ -1108,86 +892,78 @@ void showPhotoFromCenter(const String &url)
     }
     isLoadingPhoto = true;
 
-    LOGF("[PhotoCenter] Heap libre: %d bytes", ESP.getFreeHeap());
+    LOGF("[Photo] Heap libre: %d bytes", ESP.getFreeHeap());
+    LOGF("[Photo] Solicitando foto index=%d via MQTT", index);
 
-    ensureHttpClient();
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String payload = "{\"index\":" + String(index) + "}";
 
-    LOGF("Conectando a: %s", url.c_str());
-    http.begin(*httpClient, url);
-    http.setTimeout(HTTP_TIMEOUT_DOWNLOAD);
-
-    int httpCode = http.GET();
-    if (httpCode != 200)
-    {
-        LOGF("[Photo:showPhotoFromCenter] Error HTTP al descargar foto: %d (URL: %s)", httpCode, url.c_str());
-        http.end();
-        if (httpCode < 0 && httpClient != nullptr) {
-            LOG("[PhotoCenter] Error de conexión - cerrando cliente");
-            httpClient->stop();
-        }
+    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+        LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
         return;
     }
 
-    WiFiClient *stream = http.getStreamPtr();
+    // Esperar respuesta
+    if (waitForMqttResponse("photo", 15000)) {
+        esp_task_wdt_reset();
+        LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
+        displayPhotoWithFade();
+    } else {
+        LOG("[Photo] Error recibiendo foto via MQTT");
+    }
 
-    // Leer cabecera con validación de errores
-    int b1 = stream->read();
-    int b2 = stream->read();
-    int b3 = stream->read();
-    int b4 = stream->read();
+    isLoadingPhoto = false;
+}
 
-    if (b1 < 0 || b2 < 0 || b3 < 0 || b4 < 0) {
-        LOG("[PhotoCenter] Error leyendo cabecera - bytes inválidos");
-        http.end();
+// Función para mostrar foto por ID (via MQTT)
+void showPhotoById(int id)
+{
+    // Evitar condiciones de carrera
+    if (isLoadingPhoto) {
+        LOG("Ya hay una foto cargándose, ignorando petición");
+        return;
+    }
+    isLoadingPhoto = true;
+
+    LOGF("[Photo] Heap libre: %d bytes", ESP.getFreeHeap());
+    LOGF("[Photo] Solicitando foto id=%d via MQTT", id);
+
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String payload = "{\"id\":" + String(id) + "}";
+
+    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+        LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
         return;
     }
 
-    uint16_t titleLen = (b1 << 8) | b2;
-    uint16_t usernameLen = (b3 << 8) | b4;
-
-    // Limitar tamaño máximo para evitar stack overflow
-    const uint16_t MAX_HEADER_LEN = 128;
-    if (titleLen > MAX_HEADER_LEN || usernameLen > MAX_HEADER_LEN) {
-        LOGF("[PhotoCenter] Cabecera corrupta: titleLen=%d, usernameLen=%d", titleLen, usernameLen);
-        http.end();
-        isLoadingPhoto = false;
-        return;
+    // Esperar respuesta
+    if (waitForMqttResponse("photo", 15000)) {
+        esp_task_wdt_reset();
+        LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
+        displayPhotoWithFade();
+    } else {
+        LOG("[Photo] Error recibiendo foto via MQTT");
     }
 
-    char title[MAX_HEADER_LEN + 1];
-    char username[MAX_HEADER_LEN + 1];
+    isLoadingPhoto = false;
+}
 
-    for (int i = 0; i < titleLen; i++) {
-        int c = stream->read();
-        if (c < 0) {
-            LOG("[PhotoCenter] Error leyendo título");
-            http.end();
-            isLoadingPhoto = false;
-            return;
-        }
-        title[i] = (char)c;
-    }
-    for (int i = 0; i < usernameLen; i++) {
-        int c = stream->read();
-        if (c < 0) {
-            LOG("[PhotoCenter] Error leyendo username");
-            http.end();
-            isLoadingPhoto = false;
-            return;
-        }
-        username[i] = (char)c;
-    }
-    title[titleLen] = '\0';
-    username[usernameLen] = '\0';
-
+// Función auxiliar para mostrar foto desde photoBuffer con animación desde el centro
+void displayPhotoFromCenter()
+{
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
-    // 🟥 ANIMACIÓN DE CUADRADOS DE COLORES
+    const int width = 64;
+    const int height = 64;
     int centerX = 32;
     int centerY = 32;
+
+    // 🟥 ANIMACIÓN DE CUADRADOS DE COLORES
     uint16_t colors[] = {color1, color2, color3, color4, color5};
     int numColors = 5;
 
@@ -1206,34 +982,11 @@ void showPhotoFromCenter(const String &url)
                     }
                 }
             }
-            delay(5); // Ajusta este valor para controlar la velocidad de la animación
+            delay(5);
         }
     }
 
-    // 🖼️ IMAGEN
-
-    // Usar buffer estático para evitar fragmentación de memoria
-    const int width = 64;
-    const int height = 64;
-    const int totalPixels = width * height;
-    const int totalBytes = totalPixels * 3;
-
-    // Reset watchdog antes de lectura larga
-    esp_task_wdt_reset();
-    // Leer toda la imagen RGB888 (64x64x3) al buffer estático
-    size_t read = stream->readBytes(photoBuffer, totalBytes);
-    esp_task_wdt_reset();
-    LOGF("[PhotoCenter] Read complete, got %d bytes, heap: %d", read, ESP.getFreeHeap());
-
-    if (read != totalBytes)
-    {
-        LOGF("[Photo:showPhotoFromCenter] Error de descarga: esperados %d bytes pero recibidos %d", totalBytes, read);
-        http.end();
-        isLoadingPhoto = false;
-        return;
-    }
-
-    // Mostrar imagen desde el centro
+    // 🖼️ Mostrar imagen desde el centro
     for (int radius = 0; radius <= max(width, height); radius++)
     {
         for (int y = centerY - radius; y <= centerY + radius; y++)
@@ -1245,7 +998,7 @@ void showPhotoFromCenter(const String &url)
                     if (abs(x - centerX) == radius || abs(y - centerY) == radius)
                     {
                         int index = (y * width + x) * 3;
-                        uint8_t r = photoBuffer[index + 2]; // ⚠️ BGR → RGB
+                        uint8_t r = photoBuffer[index + 2];
                         uint8_t g = photoBuffer[index + 0];
                         uint8_t b = photoBuffer[index + 1];
                         uint16_t color = dma_display->color565(r, g, b);
@@ -1254,33 +1007,57 @@ void showPhotoFromCenter(const String &url)
                 }
             }
         }
-        delay(5); // Controla la velocidad de la animación
+        delay(5);
     }
-    showPhotoInfo(String(title), String(username));
+    showPhotoInfo(String(photoTitle), String(photoAuthor));
+}
 
-    http.end();
-
-    // Liberar cliente SSL para dar memoria a Spotify
-    if (httpClient != nullptr) {
-        httpClient->stop();
-        delete httpClient;
-        httpClient = nullptr;
+// Función para mostrar foto por ID con animación desde centro (via MQTT)
+void showPhotoFromCenterById(int id)
+{
+    // Evitar condiciones de carrera
+    if (isLoadingPhoto) {
+        LOG("Ya hay una foto cargándose, ignorando petición");
+        return;
     }
+    isLoadingPhoto = true;
+
+    LOGF("[PhotoCenter] Heap libre: %d bytes", ESP.getFreeHeap());
+    LOGF("[PhotoCenter] Solicitando foto id=%d via MQTT", id);
+
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String payload = "{\"id\":" + String(id) + "}";
+
+    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+        LOG("[PhotoCenter] Error publicando request MQTT");
+        isLoadingPhoto = false;
+        return;
+    }
+
+    // Esperar respuesta
+    if (waitForMqttResponse("photo", 15000)) {
+        esp_task_wdt_reset();
+        LOGF("[PhotoCenter] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
+        displayPhotoFromCenter();
+    } else {
+        LOG("[PhotoCenter] Error recibiendo foto via MQTT");
+    }
+
     songShowing = "";
     isLoadingPhoto = false;
 }
 
-void showPhotoIndex(int photoIndex)
+void showPhotoIndex(int index)
 {
-    String url = String(serverUrl) + "public/photo/get-photo-by-pixie?index=" + String(photoIndex) + "&pixieId=" + String(pixieId);
-    LOGF("Llamando a: %s", url.c_str());
-    showPhoto(url);
+    LOGF("[Photo] Solicitando foto index=%d", index);
+    showPhoto(index);
 }
 
-void showPhotoId(int photoId)
+void showPhotoId(int id)
 {
-    String url = String(serverUrl) + "public/photo/get-photo?id=" + String(photoId);
-    showPhoto(url);
+    LOGF("[Photo] Solicitando foto id=%d", id);
+    showPhotoById(id);
 }
 
 // Función para la animación de nueva foto
@@ -1288,11 +1065,10 @@ void onReceiveNewPic(int id)
 {
     photoIndex = 1;
 
-    String url = String(serverUrl) + "public/photo/get-photo?id=" + String(id);
-    // Mostrar la foto con animación desde el centro
-    showPhotoFromCenter(url);
-    lastPhotoChange = millis(); 
-    photoIndex = 0; 
+    // Mostrar la foto con animación desde el centro via MQTT
+    showPhotoFromCenterById(id);
+    lastPhotoChange = millis();
+    photoIndex = 0;
     songShowing = "";
 }
 
@@ -1331,120 +1107,107 @@ void checkForUpdates()
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
 
-    ensureHttpClient();
+    LOG("[OTA] Solicitando información de actualización via MQTT");
 
-    LOGF("Conectando a: %spublic/version/latest", serverUrl);
-    http.begin(*httpClient, String(serverUrl) + "public/version/latest");
-    http.setTimeout(HTTP_TIMEOUT);
-    int httpCode = http.GET();
+    // Publicar request via MQTT
+    String topic = String("pixie/") + String(pixieId) + "/request/ota";
+    if (!mqttClient.publish(topic.c_str(), "{}")) {
+        LOG("[OTA] Error publicando request MQTT");
+        return;
+    }
 
-    if (httpCode == 200)
+    // Esperar respuesta
+    if (!waitForMqttResponse("ota", 10000)) {
+        LOG("[OTA] Error recibiendo respuesta de versión via MQTT");
+        return;
+    }
+
+    // Parsear la respuesta JSON (almacenada en httpBuffer por handleOtaResponse)
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, httpBuffer);
+    if (error) {
+        LOGF("[OTA] Error parseando JSON de versión: %s", error.c_str());
+        return;
+    }
+
+    int latestVersion = doc["version"];
+    String updateUrl = doc["url"].as<String>();
+    LOGF("Latest version: %d", latestVersion);
+    LOGF("Update URL: %s", updateUrl.c_str());
+
+    if (latestVersion > currentVersion)
     {
-        JsonDocument doc;
-        delay(250); // Puede ayudar
-        DeserializationError error = deserializeJson(doc, http.getStream());
-        if (!error)
+        LOGF("New version available: %d", latestVersion);
+        showUpdateMessage();
+        LOG("Downloading update...");
+
+        // La descarga del firmware sigue usando HTTP (necesario para streaming)
+        WiFiClient *updateClient;
+        if (updateUrl.startsWith("https://")) {
+            WiFiClientSecure *secureClient = new WiFiClientSecure();
+            secureClient->setInsecure();
+            updateClient = secureClient;
+        } else {
+            updateClient = new WiFiClient();
+        }
+
+        HTTPClient updateHttp;
+        updateHttp.begin(*updateClient, updateUrl);
+        updateHttp.setTimeout(30000);
+        int updateHttpCode = updateHttp.GET();
+
+        if (updateHttpCode == 200)
         {
-            int latestVersion = doc["version"];
-            String updateUrl = doc["url"].as<String>();
-            LOGF("Latest version: %d", latestVersion);
-            LOGF("Update URL: %s", updateUrl.c_str());
+            WiFiClient *updateStream = updateHttp.getStreamPtr();
+            size_t contentLength = updateHttp.getSize();
+            Update.onProgress([](size_t written, size_t total)
+                              {
+                int percent = (written * 100) / total;
+                showPercetage(percent);
+                LOGF("Progreso: %d%% (%d/%d bytes)", percent, written, total); });
 
-            if (latestVersion > currentVersion)
+            if (Update.begin(contentLength))
             {
-                LOGF("New version available: %d", latestVersion);
-                showUpdateMessage();
-                LOG("Downloading update...");
-                http.end();
-                
-                // Detectar si la URL es HTTP o HTTPS y crear el cliente apropiado
-                WiFiClient *updateClient;
-                if (updateUrl.startsWith("https://")) {
-                    WiFiClientSecure *secureClient = new WiFiClientSecure();
-                    secureClient->setInsecure();
-                    updateClient = secureClient;
-                } else {
-                    updateClient = new WiFiClient();
-                }
-                
-                HTTPClient updateHttp;
-                updateHttp.begin(*updateClient, updateUrl);
-                updateHttp.setTimeout(30000); // 30 segundos timeout
-                int updateHttpCode = updateHttp.GET();
-
-                if (updateHttpCode == 200)
+                size_t written = Update.writeStream(*updateStream);
+                if (written == contentLength)
                 {
-                    WiFiClient *updateStream = updateHttp.getStreamPtr();
-                    size_t contentLength = updateHttp.getSize();
-                    Update.onProgress([](size_t written, size_t total)
-                                      {
-            int percent = (written * 100) / total;
-            showPercetage(percent);
-            LOGF("Progreso: %d%% (%d/%d bytes)", percent, written, total); });
-
-                    if (Update.begin(contentLength))
+                    LOG("[OTA] Firmware escrito correctamente");
+                    if (Update.end())
                     {
-                        size_t written = Update.writeStream(*updateStream);
-                        if (written == contentLength)
-                        {
-                            LOG("[OTA:checkForUpdates] Firmware escrito correctamente");
-                            if (Update.end())
-                            {
-                                LOG("[OTA:checkForUpdates] Actualización completada exitosamente");
-                                // TODO: Guardar la nueva version
-                                preferences.putInt("currentVersion", latestVersion);
-                                ESP.restart();
-                            }
-                            else
-                            {
-                                LOGF("[OTA:checkForUpdates] Error al finalizar Update: %s", Update.errorString());
-                            }
-                        }
-                        else
-                        {
-                            LOGF("[OTA:checkForUpdates] Error de escritura: solo %d/%d bytes escritos", written, contentLength);
-                        }
+                        LOG("[OTA] Actualización completada exitosamente");
+                        preferences.putInt("currentVersion", latestVersion);
+                        ESP.restart();
                     }
                     else
                     {
-                        LOG("[OTA:checkForUpdates] Error: espacio insuficiente para actualización");
+                        LOGF("[OTA] Error al finalizar Update: %s", Update.errorString());
                     }
                 }
                 else
                 {
-                    LOGF("[OTA:checkForUpdates] Error HTTP al descargar firmware: %d", updateHttpCode);
-                    if (updateHttpCode == 404) {
-                        LOG("[OTA:checkForUpdates] Archivo no encontrado o URL expirada");
-                    }
-                    // Imprimir la respuesta para debug
-                    String response = updateHttp.getString();
-                    LOGF("[OTA:checkForUpdates] Respuesta del servidor: %s", response.c_str());
+                    LOGF("[OTA] Error de escritura: solo %d/%d bytes escritos", written, contentLength);
                 }
-                updateHttp.end();
-                delete updateClient;
             }
             else
             {
-                LOG("No new updates available.");
+                LOG("[OTA] Error: espacio insuficiente para actualización");
             }
         }
         else
         {
-            LOGF("[OTA:checkForUpdates] Error parseando JSON de versión: %s", error.c_str());
+            LOGF("[OTA] Error HTTP al descargar firmware: %d", updateHttpCode);
+            if (updateHttpCode == 404) {
+                LOG("[OTA] Archivo no encontrado o URL expirada");
+            }
+            String response = updateHttp.getString();
+            LOGF("[OTA] Respuesta del servidor: %s", response.c_str());
         }
+        updateHttp.end();
+        delete updateClient;
     }
     else
     {
-        LOGF("[OTA:checkForUpdates] Error HTTP al verificar actualizaciones: %d", httpCode);
-    }
-
-    http.end();
-
-    // Liberar cliente SSL para recuperar memoria
-    if (httpClient != nullptr) {
-        httpClient->stop();
-        delete httpClient;
-        httpClient = nullptr;
+        LOG("No new updates available.");
     }
 }
 
@@ -1541,10 +1304,193 @@ void showAPCredentials(const char *ssid, const char *password)
     dma_display->print("192.168.4.1");
 }
 
+// Función para esperar respuesta MQTT con timeout
+bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
+    mqttResponseReceived = false;
+    mqttResponseSuccess = false;
+    mqttResponseType = "";
+    unsigned long start = millis();
+
+    while (!mqttResponseReceived && (millis() - start) < timeout) {
+        esp_task_wdt_reset();
+        mqttClient.loop();
+        yield();
+        delay(10);
+    }
+
+    if (!mqttResponseReceived) {
+        LOGF("[MQTT] Timeout esperando respuesta %s", expectedType);
+        return false;
+    }
+
+    return mqttResponseSuccess && (mqttResponseType == expectedType);
+}
+
+// Handlers para respuestas MQTT (patrón request/response)
+void handleSongResponse(byte* payload, unsigned int length) {
+    songIdBuffer[0] = '\0';  // Limpiar buffer
+
+    if (length > 0 && length < sizeof(httpBuffer)) {
+        memcpy(httpBuffer, payload, length);
+        httpBuffer[length] = '\0';
+
+        // Parsear para extraer el id
+        char *idStart = strstr(httpBuffer, "\"id\":\"");
+        if (idStart) {
+            idStart += 6;
+            char *idEnd = strchr(idStart, '"');
+            if (idEnd && (idEnd - idStart) < 63) {
+                int idLen = idEnd - idStart;
+                strncpy(songIdBuffer, idStart, idLen);
+                songIdBuffer[idLen] = '\0';
+            }
+        }
+    }
+
+    mqttResponseReceived = true;
+    mqttResponseSuccess = true;
+    mqttResponseType = "song";
+}
+
+void handleCoverResponse(byte* payload, unsigned int length) {
+    if (length == 8192) {
+        memcpy(spotifyCoverBuffer, payload, length);
+        mqttResponseSuccess = true;
+        LOG("[MQTT] Cover recibido correctamente");
+    } else {
+        LOGF("[MQTT] Cover con tamaño incorrecto: %d (esperado 8192)", length);
+        mqttResponseSuccess = false;
+    }
+    mqttResponseReceived = true;
+    mqttResponseType = "cover";
+}
+
+void handlePhotoResponse(byte* payload, unsigned int length) {
+    photoTitle[0] = '\0';
+    photoAuthor[0] = '\0';
+
+    // Formato: {"title":"x","author":"y"}\n[12288 bytes binarios]
+    // Buscar el newline que separa JSON de binario
+    int jsonEnd = -1;
+    for (unsigned int i = 0; i < min(length, 256u); i++) {
+        if (payload[i] == '\n') {
+            jsonEnd = i;
+            break;
+        }
+    }
+
+    if (jsonEnd > 0 && (length - jsonEnd - 1) >= 12288) {
+        // Parsear JSON metadata
+        char jsonBuf[256];
+        memcpy(jsonBuf, payload, jsonEnd);
+        jsonBuf[jsonEnd] = '\0';
+
+        JsonDocument doc;
+        if (deserializeJson(doc, jsonBuf) == DeserializationError::Ok) {
+            strncpy(photoTitle, doc["title"] | "", sizeof(photoTitle) - 1);
+            strncpy(photoAuthor, doc["author"] | "", sizeof(photoAuthor) - 1);
+            photoTitle[sizeof(photoTitle) - 1] = '\0';
+            photoAuthor[sizeof(photoAuthor) - 1] = '\0';
+        }
+
+        // Copiar datos binarios
+        memcpy(photoBuffer, payload + jsonEnd + 1, 12288);
+        mqttResponseSuccess = true;
+        LOGF("[MQTT] Foto recibida: %s by %s", photoTitle, photoAuthor);
+    } else {
+        LOGF("[MQTT] Foto con formato incorrecto: length=%d, jsonEnd=%d", length, jsonEnd);
+        mqttResponseSuccess = false;
+    }
+    mqttResponseReceived = true;
+    mqttResponseType = "photo";
+}
+
+void handleOtaResponse(byte* payload, unsigned int length) {
+    if (length > 0 && length < sizeof(httpBuffer) - 1) {
+        memcpy(httpBuffer, payload, length);
+        httpBuffer[length] = '\0';
+        mqttResponseSuccess = true;
+        LOG("[MQTT] Respuesta OTA recibida");
+    } else {
+        mqttResponseSuccess = false;
+    }
+    mqttResponseReceived = true;
+    mqttResponseType = "ota";
+}
+
+void handleConfigResponse(byte* payload, unsigned int length) {
+    if (length > 0 && length < sizeof(httpBuffer) - 1) {
+        memcpy(httpBuffer, payload, length);
+        httpBuffer[length] = '\0';
+
+        JsonDocument doc;
+        if (deserializeJson(doc, httpBuffer) == DeserializationError::Ok) {
+            if (doc.containsKey("brightness")) {
+                brightness = doc["brightness"];
+                dma_display->setBrightness(max(brightness, 10));
+                preferences.putInt("brightness", brightness);
+                LOGF("[MQTT] Config brightness: %d", brightness);
+            }
+            if (doc.containsKey("pictures_on_queue")) {
+                maxPhotos = doc["pictures_on_queue"];
+                preferences.putInt("maxPhotos", maxPhotos);
+                LOGF("[MQTT] Config max photos: %d", maxPhotos);
+            }
+            if (doc.containsKey("spotify_enabled")) {
+                allowSpotify = doc["spotify_enabled"];
+                preferences.putBool("allowSpotify", allowSpotify);
+                LOGF("[MQTT] Config spotify: %s", allowSpotify ? "true" : "false");
+            }
+            if (doc.containsKey("secs_between_photos")) {
+                int secsBetweenPhotos = doc["secs_between_photos"];
+                secsPhotos = secsBetweenPhotos * 1000;
+                preferences.putUInt("secsPhotos", secsPhotos);
+                LOGF("[MQTT] Config secs between photos: %d", secsBetweenPhotos);
+            }
+            if (doc.containsKey("code")) {
+                activationCode = doc["code"].as<String>();
+                preferences.putString("code", activationCode);
+                LOGF("[MQTT] Config code: %s", activationCode.c_str());
+            }
+            mqttResponseSuccess = true;
+            LOG("[MQTT] Configuración recibida correctamente");
+        } else {
+            LOG("[MQTT] Error parseando config JSON");
+            mqttResponseSuccess = false;
+        }
+    } else {
+        mqttResponseSuccess = false;
+    }
+    mqttResponseReceived = true;
+    mqttResponseType = "config";
+}
+
 // Función para manejar los mensajes MQTT recibidos
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-    // Crear un buffer para el mensaje
+    String topicStr = String(topic);
+
+    // Manejar respuestas del patrón request/response
+    if (topicStr.indexOf("/response/") != -1) {
+        if (topicStr.endsWith("/response/song")) {
+            handleSongResponse(payload, length);
+        }
+        else if (topicStr.endsWith("/response/cover")) {
+            handleCoverResponse(payload, length);
+        }
+        else if (topicStr.endsWith("/response/photo")) {
+            handlePhotoResponse(payload, length);
+        }
+        else if (topicStr.endsWith("/response/ota")) {
+            handleOtaResponse(payload, length);
+        }
+        else if (topicStr.endsWith("/response/config")) {
+            handleConfigResponse(payload, length);
+        }
+        return;  // No procesar como comando normal
+    }
+
+    // Crear un buffer para el mensaje (solo para comandos, no respuestas binarias)
     char message[length + 1];
     memcpy(message, payload, length);
     message[length] = '\0';
@@ -1570,7 +1516,36 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             }
             else if (strcmp(action, "update_info") == 0)
             {
-                getPixie();
+                LOG("[MQTT] Recibida actualización de configuración");
+
+                // Leer configuración directamente del payload MQTT
+                if (doc.containsKey("brightness")) {
+                    brightness = doc["brightness"];
+                    dma_display->setBrightness(max(brightness, 10));
+                    preferences.putInt("brightness", brightness);
+                    LOGF("[MQTT] Brightness: %d", brightness);
+                }
+                if (doc.containsKey("pictures_on_queue")) {
+                    maxPhotos = doc["pictures_on_queue"];
+                    preferences.putInt("maxPhotos", maxPhotos);
+                    LOGF("[MQTT] Max photos: %d", maxPhotos);
+                }
+                if (doc.containsKey("spotify_enabled")) {
+                    allowSpotify = doc["spotify_enabled"];
+                    preferences.putBool("allowSpotify", allowSpotify);
+                    LOGF("[MQTT] Spotify enabled: %s", allowSpotify ? "true" : "false");
+                }
+                if (doc.containsKey("secs_between_photos")) {
+                    int secsBetweenPhotos = doc["secs_between_photos"];
+                    secsPhotos = secsBetweenPhotos * 1000;
+                    preferences.putUInt("secsPhotos", secsPhotos);
+                    LOGF("[MQTT] Secs between photos: %d", secsBetweenPhotos);
+                }
+                if (doc.containsKey("code")) {
+                    activationCode = doc["code"].as<String>();
+                    preferences.putString("code", activationCode);
+                    LOGF("[MQTT] Code: %s", activationCode.c_str());
+                }
             }
             else if (strcmp(action, "update_bin") == 0)
             {
@@ -1709,14 +1684,26 @@ void mqttReconnect()
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
         {
             LOG("[MQTT:mqttReconnect] Conectado exitosamente");
+
+            // Suscribirse al topic principal de comandos
             String topic = String("pixie/") + String(pixieId);
             LOGF("[MQTT:mqttReconnect] Suscribiendo al tema: %s", topic.c_str());
             if (mqttClient.subscribe(topic.c_str())) {
                 LOG("[MQTT:mqttReconnect] Suscripción exitosa");
-                loadingMsg = "";
             } else {
                 LOG("[MQTT:mqttReconnect] Error: fallo en suscripción al tema");
             }
+
+            // Suscribirse a topics de respuesta (para patrón request/response)
+            String responseTopic = String("pixie/") + String(pixieId) + "/response/#";
+            LOGF("[MQTT:mqttReconnect] Suscribiendo a respuestas: %s", responseTopic.c_str());
+            if (mqttClient.subscribe(responseTopic.c_str())) {
+                LOG("[MQTT:mqttReconnect] Suscripción a respuestas exitosa");
+                loadingMsg = "";
+            } else {
+                LOG("[MQTT:mqttReconnect] Error: fallo en suscripción a respuestas");
+            }
+
             return;  // Conexión exitosa
         }
         else
@@ -2171,7 +2158,7 @@ void checkActivation() {
         while (currentCode != "0000" && millis() - startTime < ACTIVATION_TIMEOUT)
         {
             esp_task_wdt_reset();  // Reset watchdog durante espera larga
-            getPixie();
+            requestConfig();  // Solicitar config via MQTT para obtener código de activación
             currentCode = preferences.getString("code", "0000");
             attempts++;
 
@@ -2320,7 +2307,7 @@ void setup()
         mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
         mqttClient.setCallback(mqttCallback);
         mqttClient.setKeepAlive(60);  // Keep-alive de 60 segundos
-        mqttClient.setBufferSize(512); // Aumentar buffer para mensajes más grandes
+        mqttClient.setBufferSize(16384); // Buffer grande para fotos (12KB) y covers (8KB) via MQTT
     }
 
     // Configuración de OTA
@@ -2375,16 +2362,17 @@ void setup()
     // Register Pixie if not registered
     if (pixieId == 0) {
         registerPixie();
-    } else {
-        getPixie();
     }
-
-    // Verificar estado de activación
-    checkActivation();
 
     // Conectar a MQTT
     showLoadingMsg("Connecting server");
     mqttReconnect();
+
+    // Solicitar configuración via MQTT (después de conectar)
+    requestConfig();
+
+    // Verificar estado de activación
+    checkActivation();
 
     // Inicializar Watchdog Timer
     esp_task_wdt_init(WDT_TIMEOUT, true);
