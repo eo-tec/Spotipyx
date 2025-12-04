@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Spotipyx is an ESP32-based digital photo frame with Spotify integration. The device displays photos and Spotify album covers on a 64x64 LED matrix panel, with features including:
 
-- WiFi connectivity with serial credential input
-- MQTT communication for remote control
+- WiFi connectivity with BLE credential configuration
+- MQTT communication for all server interactions
 - Photo display with animations
 - Spotify cover art integration
 - Over-the-Air (OTA) updates
@@ -44,10 +44,10 @@ pio run --target clean
 - Handles photo cycling and Spotify integration
 - Implements OTA updates and device registration
 
-**Pixie Library (`lib/Pixie/`)**
+**frame. Library (`lib/Pixie/`)**
 - Provides API abstraction for server communication
 - Contains static utility functions for display operations
-- Handles HTTP requests to the backend server
+- Handles MQTT communication with the backend server
 
 **Display Assets (`src/pics.h`)**
 - Contains bitmap data for WiFi icons and logos
@@ -61,15 +61,13 @@ pio run --target clean
 - Supports multiple display modes (photos, Spotify covers, time, loading states)
 
 **Network Communication**
-- **WiFi Configuration**: Web-based setup via Access Point mode with user-friendly interface
-- **Fallback**: Serial communication support with format: `#SSID;ssid#PASS;password` 
-- MQTT client connects to HiveMQ cloud broker for real-time updates
-- HTTP/HTTPS clients for API communication with backend server
+- **WiFi Configuration**: BLE-based setup for credential input
+- MQTT client connects to HiveMQ cloud broker for all server communication
+- All API interactions handled via MQTT (no HTTP/HTTPS)
 
 **WiFi Setup System**
-- **Access Point Mode**: Device creates "Pixie" AP (password: "12345678") when no credentials stored
-- **Web Interface**: Simple HTML form at `192.168.4.1` for WiFi configuration  
-- **Network Scanning**: Automatic scanning and display of available WiFi networks
+- **BLE Configuration**: Device advertises as "frame." for WiFi credential setup
+- **Network Scanning**: Automatic scanning and display of available WiFi networks via BLE
 - **Real-time Feedback**: Connection status and error handling with automatic restart
 
 **Photo Management**
@@ -88,23 +86,14 @@ pio run --target clean
 - Serial baud rate: 115200
 - Default photo interval: 30 seconds
 - MQTT broker: HiveMQ cloud (TLS on port 8883)
-- Server URLs: Development (192.168.18.53:3000) vs Production (api.mypixelframe.com)
 
 ### Device Registration
 
-The device registers with the backend using its MAC address and receives a unique Pixie ID for identification in API calls and MQTT topics.
+The device registers with the backend using its MAC address and receives a unique frame. ID for identification in MQTT topics.
 
 ## Development Notes
 
-- The project uses both secure (HTTPS/TLS) and insecure HTTP connections based on DEV flag
+- All server communication is handled via MQTT over TLS
 - OTA updates are supported with progress display on the LED matrix
-- Web-based WiFi configuration with multiple endpoints for complete user experience
-- Serial communication is available as fallback for credential input and debugging
-
-### Web Server Endpoints (AP Mode)
-
-- `GET /` - Main WiFi configuration page
-- `GET /scan` - WiFi network scanning and selection page  
-- `POST /connect` - WiFi connection handler with real-time feedback
-- `GET /reset` - Device reset functionality
-- `GET /status` - Connection status check and final confirmation
+- BLE-based WiFi configuration for user-friendly setup experience
+- Serial communication is available for debugging

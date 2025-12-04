@@ -1,3 +1,4 @@
+#include <string>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -8,12 +9,12 @@
 #include <Fonts/FreeSans12pt7b.h>
 #include <Fonts/Picopixel.h>
 #include <ArduinoOTA.h>
-#include <pics.h>        // Aquí se asume que en pics.h están definidas las imágenes (incluido "qr")
 #include <logo.h>        // Logo personalizado 64x64 RGB
 #include <Preferences.h> // Para guardar las credenciales en memoria
-#include <WebServer.h>   // Para el servidor web en modo AP
 #include <PubSubClient.h>
 #include <esp_task_wdt.h>
+#include <NimBLEDevice.h>
+#include "ble_config.h"
 
 // Macros de logging con timestamp
 #define LOG(msg) Serial.printf("[%lu] %s\n", millis(), msg)
@@ -61,7 +62,7 @@ int pixieId = 0;
 int photoIndex = 0;
 
 const bool DEV = true;
-const char *serverUrl = DEV ? "http://192.168.18.147:3000/" : "https://api.mypixelframe.com/";
+const char *serverUrl = DEV ? "http://192.168.18.148:3000/" : "https://api.mypixelframe.com/";
 
 // Variable para controlar el reset automático al arrancar
 const bool AUTO_RESET_ON_STARTUP = false; // Cambiar a false para deshabilitar el reset automático
@@ -92,6 +93,7 @@ int nameY = 0;
 
 // Flag para evitar condiciones de carrera en descarga de fotos
 volatile bool isLoadingPhoto = false;
+volatile int pendingNewPhotoId = -1;  // ID de foto nueva pendiente (-1 = ninguna)
 
 // Variables para el modo de dibujo
 bool drawingMode = false;
@@ -128,9 +130,16 @@ int dirtyMaxY = -1;
 
 // Declaraciones globales para las credenciales y el servidor
 Preferences preferences;
-bool apMode = false; // Se activará si no hay credenciales guardadas
 bool allowSpotify = true;
-WebServer webServer(80); // Servidor web para configuración WiFi
+
+// Variables BLE para provisioning
+NimBLEServer* pBLEServer = nullptr;
+NimBLECharacteristic* pWifiCredentialsChar = nullptr;
+NimBLECharacteristic* pResponseChar = nullptr;
+bool bleDeviceConnected = false;
+bool bleCredentialsReceived = false;
+String bleReceivedSSID = "";
+String bleReceivedPassword = "";
 
 // Cliente HTTP reutilizable para API (getPixie, registerPixie, OTA download)
 
@@ -351,37 +360,7 @@ void addDrawCommand(int x, int y, uint16_t color, int size) {
 
 // ===== FIN FUNCIONES DE DIBUJO =====
 
-// Función para mostrar el icono de WiFi parpadeando (ya existente)
-void showWiFiIcon(int n)
-{
-    uint16_t draw[32][32];
-    if (n == 0)
-    {
-        memcpy(draw, wifiArray, sizeof(draw));
-    }
-    else if (n == 1)
-    {
-        memcpy(draw, wifi1, sizeof(draw));
-    }
-    else if (n == 2)
-    {
-        memcpy(draw, wifi2, sizeof(draw));
-    }
-    else if (n == 3)
-    {
-        memcpy(draw, wifi3, sizeof(draw));
-    }
-    dma_display->clearScreen();
-    for (int y = 0; y < 32; y++)
-    {
-        for (int x = 0; x < 32; x++)
-        {
-            drawPixelWithBuffer(x + 16, y + 16, draw[y][x] > 0 ? myWHITE : myBLACK);
-        }
-    }
-}
-
-// Función para mostrar el porcentaje durante la actualización OTA (ya existente)
+// Función para mostrar el porcentaje durante la actualización OTA
 int lastPercentage = 0;
 void showPercetage(int percentage)
 {
@@ -460,8 +439,15 @@ volatile bool mqttResponseReceived = false;
 volatile bool mqttResponseSuccess = false;
 String mqttResponseType = "";
 
-// Forward declaration para función de espera MQTT
+// Variables para registro via MQTT
+volatile int mqttRegisterPixieId = 0;
+String mqttRegisterCode = "";
+
+// Forward declarations
 bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000);
+void processPendingPhoto();
+void onReceiveNewPic(int id);
+void mqttCallback(char *topic, byte *payload, unsigned int length);
 
 // Cliente WiFi reutilizable para HTTP (getPixie, registerPixie, OTA download)
 static WiFiClientSecure *httpClient = nullptr;
@@ -902,6 +888,7 @@ void showPhoto(int index)
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
+        processPendingPhoto();
         return;
     }
 
@@ -915,6 +902,7 @@ void showPhoto(int index)
     }
 
     isLoadingPhoto = false;
+    processPendingPhoto();
 }
 
 // Función para mostrar foto por ID (via MQTT)
@@ -937,6 +925,7 @@ void showPhotoById(int id)
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
+        processPendingPhoto();
         return;
     }
 
@@ -950,6 +939,7 @@ void showPhotoById(int id)
     }
 
     isLoadingPhoto = false;
+    processPendingPhoto();
 }
 
 // Función auxiliar para mostrar foto desde photoBuffer con animación desde el centro
@@ -1032,6 +1022,7 @@ void showPhotoFromCenterById(int id)
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[PhotoCenter] Error publicando request MQTT");
         isLoadingPhoto = false;
+        processPendingPhoto();
         return;
     }
 
@@ -1046,6 +1037,7 @@ void showPhotoFromCenterById(int id)
 
     songShowing = "";
     isLoadingPhoto = false;
+    processPendingPhoto();
 }
 
 void showPhotoIndex(int index)
@@ -1060,9 +1052,26 @@ void showPhotoId(int id)
     showPhotoById(id);
 }
 
+// Función para procesar foto pendiente (si hay alguna)
+void processPendingPhoto() {
+    if (pendingNewPhotoId >= 0) {
+        int id = pendingNewPhotoId;
+        pendingNewPhotoId = -1;  // Limpiar antes de procesar
+        LOGF("[Photo] Procesando foto pendiente id=%d", id);
+        onReceiveNewPic(id);
+    }
+}
+
 // Función para la animación de nueva foto
 void onReceiveNewPic(int id)
 {
+    // Si ya hay una foto cargándose, guardar como pendiente
+    if (isLoadingPhoto) {
+        LOGF("[Photo] Foto %d guardada como pendiente (hay otra cargando)", id);
+        pendingNewPhotoId = id;
+        return;
+    }
+
     photoIndex = 1;
 
     // Mostrar la foto con animación desde el centro via MQTT
@@ -1211,55 +1220,64 @@ void checkForUpdates()
     }
 }
 
-void registerPixie()
+// Registro via MQTT (reemplaza HTTP para evitar problemas SSL)
+bool registerPixieViaMQTT()
 {
-    ensureHttpClient();
-
     String macAddress = WiFi.macAddress();
-    LOGF("Registering Pixie with MAC: %s", macAddress.c_str());
+    LOGF("[MQTT:register] Registrando Pixie con MAC: %s", macAddress.c_str());
 
-    http.begin(*httpClient, String(serverUrl) + "public/pixie/add");
-    http.setTimeout(HTTP_TIMEOUT);
-    http.addHeader("Content-Type", "application/json");
+    // Client ID temporal basado en MAC
+    String tempClientId = "pixie-mac-" + macAddress;
+    tempClientId.replace(":", "");  // Quitar : del MAC para el client ID
 
-    JsonDocument doc;
-    doc["mac"] = macAddress;
-    String requestBody;
-    serializeJson(doc, requestBody);
+    // Configurar MQTT
+    mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
+    mqttClient.setCallback(mqttCallback);
+    mqttClient.setKeepAlive(60);
 
-    int httpCode = http.POST(requestBody);
+    // Conectar con client ID temporal
+    LOGF("[MQTT:register] Conectando con client ID: %s", tempClientId.c_str());
+    if (!mqttClient.connect(tempClientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD)) {
+        LOGF("[MQTT:register] Error conectando: %d", mqttClient.state());
+        return false;
+    }
+    LOG("[MQTT:register] Conectado a MQTT");
 
-    if (httpCode == 200)
-    {
-        JsonDocument responseDoc;
-        delay(250);                            // Puede ayudar
-        DeserializationError error = deserializeJson(responseDoc, http.getStream());
-        if (!error)
-        {
-            pixieId = responseDoc["pixie"]["id"];
-            String activationCode = responseDoc["code"].as<String>();
+    // Suscribirse al topic de respuesta
+    String responseTopic = "pixie/mac/" + macAddress + "/response/register";
+    LOGF("[MQTT:register] Suscribiendo a: %s", responseTopic.c_str());
+    if (!mqttClient.subscribe(responseTopic.c_str())) {
+        LOG("[MQTT:register] Error suscribiendo");
+        mqttClient.disconnect();
+        return false;
+    }
+
+    // Publicar request de registro
+    String requestTopic = "pixie/mac/" + macAddress + "/request/register";
+    LOGF("[MQTT:register] Publicando en: %s", requestTopic.c_str());
+    if (!mqttClient.publish(requestTopic.c_str(), "{}")) {
+        LOG("[MQTT:register] Error publicando request");
+        mqttClient.disconnect();
+        return false;
+    }
+
+    // Esperar respuesta
+    if (waitForMqttResponse("register", 10000)) {
+        if (mqttRegisterPixieId > 0) {
+            pixieId = mqttRegisterPixieId;
             preferences.putInt("pixieId", pixieId);
-            preferences.putString("code", activationCode);
-            LOGF("Pixie registered with ID: %d and code: %s", pixieId, activationCode.c_str());
+            preferences.putString("code", mqttRegisterCode);
+            LOGF("[MQTT:register] Pixie registrado: ID=%d, code=%s", pixieId, mqttRegisterCode.c_str());
+
+            // Desconectar para reconectar luego con el client ID correcto
+            mqttClient.disconnect();
+            return true;
         }
-        else
-        {
-            LOGF("[Pixie:registerPixie] Error parseando JSON de registro: %s", error.c_str());
-        }
-    }
-    else
-    {
-        LOGF("[Pixie:registerPixie] Error HTTP al registrar dispositivo: %d", httpCode);
     }
 
-    http.end();
-
-    // Liberar cliente SSL para recuperar memoria
-    if (httpClient != nullptr) {
-        httpClient->stop();
-        delete httpClient;
-        httpClient = nullptr;
-    }
+    LOG("[MQTT:register] Timeout o error en registro");
+    mqttClient.disconnect();
+    return false;
 }
 
 // Función para reiniciar todas las preferencias a valores de fábrica
@@ -1281,29 +1299,6 @@ void testInit()
     LOG("Preferencias reiniciadas a valores de fábrica");
 }
 
-// Función para mostrar el SSID y contraseña en el panel
-void showAPCredentials(const char *ssid, const char *password)
-{
-    dma_display->clearScreen();
-    dma_display->setTextSize(1);
-    dma_display->setTextColor(myWHITE);
-
-    // Mostrar SSID
-    dma_display->setFont(&Picopixel);
-    dma_display->setCursor(1, 10);
-    dma_display->print("Connect to WiFi:");
-    dma_display->setCursor(1, 20);
-    dma_display->print(String(ssid));
-    dma_display->setCursor(1, 30);
-    dma_display->print("Pass: " + String(password));
-
-    // Mostrar contraseña
-    dma_display->setCursor(1, 45);
-    dma_display->print("Go to:");
-    dma_display->setCursor(1, 55);
-    dma_display->print("192.168.4.1");
-}
-
 // Función para esperar respuesta MQTT con timeout
 bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
     mqttResponseReceived = false;
@@ -1311,19 +1306,28 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
     mqttResponseType = "";
     unsigned long start = millis();
 
-    while (!mqttResponseReceived && (millis() - start) < timeout) {
+    while ((millis() - start) < timeout) {
         esp_task_wdt_reset();
         mqttClient.loop();
         yield();
         delay(10);
+
+        // Solo salir si recibimos la respuesta del tipo esperado
+        if (mqttResponseReceived && mqttResponseType == expectedType) {
+            return mqttResponseSuccess;
+        }
+
+        // Si recibimos respuesta de otro tipo (tardía), ignorarla y seguir esperando
+        if (mqttResponseReceived && mqttResponseType != expectedType) {
+            LOGF("[MQTT] Ignorando respuesta tardía tipo '%s' (esperando '%s')",
+                 mqttResponseType.c_str(), expectedType);
+            mqttResponseReceived = false;
+            mqttResponseType = "";
+        }
     }
 
-    if (!mqttResponseReceived) {
-        LOGF("[MQTT] Timeout esperando respuesta %s", expectedType);
-        return false;
-    }
-
-    return mqttResponseSuccess && (mqttResponseType == expectedType);
+    LOGF("[MQTT] Timeout esperando respuesta %s", expectedType);
+    return false;
 }
 
 // Handlers para respuestas MQTT (patrón request/response)
@@ -1465,6 +1469,36 @@ void handleConfigResponse(byte* payload, unsigned int length) {
     mqttResponseType = "config";
 }
 
+// Handler para respuesta de registro via MQTT
+void handleRegisterResponse(byte* payload, unsigned int length) {
+    mqttRegisterPixieId = 0;
+    mqttRegisterCode = "";
+
+    if (length > 0 && length < sizeof(httpBuffer)) {
+        memcpy(httpBuffer, payload, length);
+        httpBuffer[length] = '\0';
+
+        LOGF("[MQTT:register] Respuesta recibida: %s", httpBuffer);
+
+        // Parsear {"pixieId": N, "code": "XXXX"}
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, httpBuffer);
+        if (!error) {
+            mqttRegisterPixieId = doc["pixieId"] | 0;
+            mqttRegisterCode = doc["code"].as<String>();
+            LOGF("[MQTT:register] pixieId=%d, code=%s", mqttRegisterPixieId, mqttRegisterCode.c_str());
+            mqttResponseSuccess = (mqttRegisterPixieId > 0);
+        } else {
+            LOG("[MQTT:register] Error parseando JSON");
+            mqttResponseSuccess = false;
+        }
+    } else {
+        mqttResponseSuccess = false;
+    }
+    mqttResponseReceived = true;
+    mqttResponseType = "register";
+}
+
 // Función para manejar los mensajes MQTT recibidos
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -1486,6 +1520,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         }
         else if (topicStr.endsWith("/response/config")) {
             handleConfigResponse(payload, length);
+        }
+        else if (topicStr.endsWith("/response/register")) {
+            handleRegisterResponse(payload, length);
         }
         return;  // No procesar como comando normal
     }
@@ -1756,348 +1793,247 @@ void drawLogo()
     }
 }
 
-// Función para generar la página HTML de configuración WiFi
-String generateConfigHTML() {
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>Pixie WiFi Setup</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{text-align:center;color:#333}
-.form-group{margin-bottom:15px}
-label{display:block;margin-bottom:5px;font-weight:bold}
-input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;box-sizing:border-box}
-button{background:#4CAF50;color:white;padding:12px 20px;border:none;border-radius:5px;cursor:pointer;width:100%;margin-top:10px}
-button:hover{background:#45a049}
-.scan-btn{background:#2196F3;margin-bottom:10px}
-.network-item{padding:8px;background:#f9f9f9;border:1px solid #ddd;margin:5px 0;cursor:pointer}
-.network-item:hover{background:#e3f2fd}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Pixie WiFi Setup</h1>
-<form method="post" action="/connect">
-<div class="form-group">
-<a href="/scan"><button type="button" class="scan-btn">Scan Networks</button></a>
-</div>
-<div class="form-group">
-<label for="ssid">WiFi Network:</label>
-<input type="text" name="ssid" required>
-</div>
-<div class="form-group">
-<label for="password">Password:</label>
-<input type="password" name="password" required>
-</div>
-<button type="submit">Connect to WiFi</button>
-</form>
-<div class="form-group">
-<a href="/reset"><button type="button" class="scan-btn">Reset Device</button></a>
-<a href="/reset_env"><button type="button" class="scan-btn">Reset Env Vars</button></a>
-<a href="/status"><button type="button" class="scan-btn">Connection Status</button></a>
-</div>
-</div>
-</body>
-</html>)";
-    return html;
+// ===== FUNCIONES BLE PARA PROVISIONING =====
+
+// Función auxiliar para decodificar Base64
+String base64Decode(String input) {
+    // Tabla de decodificación Base64
+    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    String output = "";
+    int val = 0, valb = -8;
+
+    for (unsigned int i = 0; i < input.length(); i++) {
+        char c = input[i];
+        if (c == '=') break;
+
+        const char* p = strchr(base64_chars, c);
+        if (p == nullptr) continue;
+
+        val = (val << 6) + (p - base64_chars);
+        valb += 6;
+
+        if (valb >= 0) {
+            output += char((val >> valb) & 0xFF);
+            valb -= 8;
+        }
+    }
+
+    return output;
 }
 
-// Función para manejar el escaneo de redes WiFi
-void handleWifiScan() {
-    LOG("Scanning WiFi networks...");
-    int networkCount = WiFi.scanNetworks();
-    
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>WiFi Networks - Pixie</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{text-align:center;color:#333}
-.network-item{padding:10px;background:#f9f9f9;border:1px solid #ddd;margin:5px 0;cursor:pointer;border-radius:5px}
-.network-item:hover{background:#e3f2fd}
-.back-btn{background:#666;color:white;padding:10px;text-decoration:none;border-radius:5px;display:inline-block;margin-bottom:20px}
-</style>
-</head>
-<body>
-<div class="container">
-<a href="/" class="back-btn">Back</a>
-<h1>Available Networks</h1>)";
-    
-    for (int i = 0; i < networkCount; i++) {
-        html += "<div class=\"network-item\" onclick=\"selectNetwork('" + WiFi.SSID(i) + "')\">";
-        html += "<strong>" + WiFi.SSID(i) + "</strong><br>";
-        html += "Signal: " + String(WiFi.RSSI(i)) + " dBm | ";
-        html += String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "Open" : "Encrypted");
-        html += "</div>";
+// Función auxiliar para codificar Base64
+String base64Encode(String input) {
+    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    String output = "";
+    int val = 0, valb = -6;
+
+    for (unsigned int i = 0; i < input.length(); i++) {
+        val = (val << 8) + (unsigned char)input[i];
+        valb += 8;
+
+        while (valb >= 0) {
+            output += base64_chars[(val >> valb) & 0x3F];
+            valb -= 6;
+        }
     }
-    
-    html += R"(
-<script>
-function selectNetwork(ssid) {
-    localStorage.setItem('selectedSSID', ssid);
-    window.location.href = '/';
+
+    if (valb > -6) {
+        output += base64_chars[((val << 8) >> (valb + 8)) & 0x3F];
+    }
+
+    while (output.length() % 4) {
+        output += '=';
+    }
+
+    return output;
 }
-window.onload = function() {
-    var ssid = localStorage.getItem('selectedSSID');
-    if (ssid) {
-        var input = parent.document.querySelector('input[name="ssid"]');
-        if (input) input.value = ssid;
+
+// Callback para conexiones del servidor BLE
+class PixieBLEServerCallbacks : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* pServer) {
+        bleDeviceConnected = true;
+        LOG("[BLE] Cliente conectado");
+    }
+
+    void onDisconnect(NimBLEServer* pServer) {
+        bleDeviceConnected = false;
+        LOG("[BLE] Cliente desconectado");
+        // Reiniciar advertising si no hay credenciales recibidas
+        if (!bleCredentialsReceived) {
+            NimBLEDevice::startAdvertising();
+            LOG("[BLE] Reiniciando advertising");
+        }
     }
 };
-</script>
-</div>
-</body>
-</html>)";
-    
-    webServer.send(200, "text/html", html);
-    WiFi.scanDelete();
-}
 
-// Función para manejar la conexión WiFi
-void handleWifiConnect() {
-    String ssid = webServer.arg("ssid");
-    String password = webServer.arg("password");
-    
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>Connecting - Pixie</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{color:#333}
-.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold}
-.success{background:#d4edda;color:#155724;border:1px solid #c3e6cb}
-.error{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb}
-.loading{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb}
-</style>
-</head>
-<body>
-<div class="container">)";
-    
-    if (ssid.length() > 0) {
-        html += "<h1>Connecting to WiFi...</h1>";
-        html += "<div class=\"status loading\">Connecting to: " + ssid + "</div>";
-        
-        // Guardar credenciales
-        preferences.putString("ssid", ssid);
-        preferences.putString("password", password);
-        
-        // Enviar respuesta inmediatamente
-        webServer.send(200, "text/html", html + R"(
-<script>
-setTimeout(function() {
-    window.location.href = '/status';
-}, 3000);
-</script>
-</div>
-</body>
-</html>)");
-        
-        // Intentar conectar en segundo plano
-        WiFi.begin(ssid.c_str(), password.c_str());
-        
-        // Dar tiempo para que se envíe la respuesta
-        delay(1000);
-        
-        // Esperar hasta 10 segundos para la conexión
-        int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-            delay(500);
-            attempts++;
+// Callback para recibir credenciales WiFi via BLE
+class WifiCredentialsCallback : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (value.length() > 0) {
+            LOG("[BLE] Credenciales recibidas");
+
+            // Los datos ya vienen en texto plano (la librería BLE del móvil decodifica base64)
+            String decoded = String(value.c_str());
+            LOGF("[BLE] Datos recibidos: %s", decoded.c_str());
+
+            // Parsear SSID;PASSWORD
+            int separatorIndex = decoded.indexOf(';');
+            if (separatorIndex > 0) {
+                bleReceivedSSID = decoded.substring(0, separatorIndex);
+                bleReceivedPassword = decoded.substring(separatorIndex + 1);
+                bleCredentialsReceived = true;
+
+                LOGF("[BLE] SSID: %s", bleReceivedSSID.c_str());
+                LOG("[BLE] Password recibida (oculta por seguridad)");
+            } else {
+                LOG("[BLE] Error: formato de credenciales inválido");
+            }
         }
-        
-        if (WiFi.status() == WL_CONNECTED) {
-            apMode = false;
-            ESP.restart();
-        }
-    } else {
-        html += "<h1>Error</h1>";
-        html += "<div class=\"status error\">SSID is required</div>";
-        html += "<a href=\"/\" style=\"color:#007bff;text-decoration:none\">Go Back</a>";
-        webServer.send(400, "text/html", html + "</div></body></html>");
     }
-}
+};
 
-// Función para manejar el reset del dispositivo
-void handleDeviceReset() {
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>Reset - Pixie</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{color:#333}
-.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold;background:#d4edda;color:#155724}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Device Reset</h1>
-<div class="status">Device reset successfully! Restarting...</div>
-<p>Please reconnect to the Pixie AP to configure WiFi again.</p>
-</div>
-</body>
-</html>)";
-    
-    webServer.send(200, "text/html", html);
-    delay(2000);
-    preferences.clear();
-    ESP.restart();
-}
-
-// Función para manejar el reset de variables de entorno
-void handleEnvVarsReset() {
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>Reset Env Vars - Pixie</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{color:#333}
-.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold;background:#d4edda;color:#155724}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Environment Variables Reset</h1>
-<div class="status">Environment variables reset successfully!</div>
-<p>Device will continue running with default values.</p>
-<a href="/" style="color:#007bff;text-decoration:none;padding:10px;background:#f8f9fa;border-radius:5px;display:inline-block;margin-top:20px">Back to Main</a>
-</div>
-</body>
-</html>)";
-    
-    webServer.send(200, "text/html", html);
-    
-    // Resetear variables de entorno
-    preferences.begin("wifi", false);
-    preferences.clear();
-    preferences.end();
-    
-    // Reinicializar con valores por defecto
-    preferences.begin("wifi", false);
-    preferences.putInt("currentVersion", 0);
-    preferences.putInt("pixieId", 0);
-    preferences.putInt("brightness", 50);
-    preferences.putInt("maxPhotos", 5);
-    preferences.putUInt("secsPhotos", 30000);
-    preferences.putString("ssid", "");
-    preferences.putString("password", "");
-    preferences.putBool("allowSpotify", false);
-    preferences.putString("code", "0000");
-    preferences.end();
-    
-    // Resetear variables globales
-    brightness = 50;
-    maxPhotos = 5;
-    secsPhotos = 30000;
-    allowSpotify = false;
-    activationCode = "0000";
-    currentVersion = 0;
-    pixieId = 0;
-}
-
-// Función para manejar el status de conexión
-void handleConnectionStatus() {
-    String html = R"(<!DOCTYPE html>
-<html>
-<head>
-<title>Status - Pixie</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="3">
-<style>
-body{font-family:Arial;margin:20px;background:#f5f5f5;text-align:center}
-.container{max-width:400px;margin:0 auto;background:white;padding:20px;border-radius:10px}
-h1{color:#333}
-.status{padding:20px;margin:20px 0;border-radius:5px;font-weight:bold}
-.success{background:#d4edda;color:#155724}
-.error{background:#f8d7da;color:#721c24}
-.loading{background:#d1ecf1;color:#0c5460}
-</style>
-</head>
-<body>
-<div class="container">)";
-    
-    if (WiFi.status() == WL_CONNECTED) {
-        html += "<h1>Connected!</h1>";
-        html += "<div class=\"status success\">Successfully connected to WiFi</div>";
-        html += "<p>IP Address: " + WiFi.localIP().toString() + "</p>";
-        html += "<p>Device will restart in normal mode...</p>";
-        webServer.send(200, "text/html", html + "</div></body></html>");
-        delay(3000);
-        apMode = false;
-        ESP.restart();
-    } else {
-        html += "<h1>Connection Failed</h1>";
-        html += "<div class=\"status error\">Failed to connect to WiFi</div>";
-        html += "<a href=\"/\" style=\"color:#007bff;text-decoration:none;padding:10px;background:#f8f9fa;border-radius:5px;display:inline-block;margin-top:20px\">Try Again</a>";
-        webServer.send(200, "text/html", html + "</div></body></html>");
+// Función para enviar respuesta via BLE
+void sendBLEResponse(bool success, String frameToken = "", String error = "") {
+    if (pResponseChar == nullptr) {
+        LOG("[BLE] Error: característica de respuesta no inicializada");
+        return;
     }
+
+    JsonDocument doc;
+    doc["success"] = success;
+    if (frameToken.length() > 0) {
+        doc["frameToken"] = frameToken;
+    }
+    if (error.length() > 0) {
+        doc["error"] = error;
+    }
+
+    String jsonResponse;
+    serializeJson(doc, jsonResponse);
+    LOGF("[BLE] Respuesta JSON: %s", jsonResponse.c_str());
+
+    // Usar std::string para asegurar que NimBLE copie los datos correctamente
+    // (setValue con const char* puede guardar solo el puntero)
+    std::string responseStr(jsonResponse.c_str());
+    pResponseChar->setValue(responseStr);
+
+    // Pequeño delay para asegurar que el valor se escriba antes de notificar
+    delay(100);
+
+    pResponseChar->notify();
+
+    // Esperar a que la notificación se procese
+    delay(500);
+
+    LOG("[BLE] Respuesta enviada");
 }
 
-// Función para configurar el servidor web en modo AP
-void setupWebServer() {
-    webServer.on("/", HTTP_GET, []() {
-        webServer.send(200, "text/html", generateConfigHTML());
-    });
-    
-    webServer.on("/scan", HTTP_GET, handleWifiScan);
-    webServer.on("/connect", HTTP_POST, handleWifiConnect);
-    webServer.on("/reset", HTTP_GET, handleDeviceReset);
-    webServer.on("/reset_env", HTTP_GET, handleEnvVarsReset);
-    webServer.on("/status", HTTP_GET, handleConnectionStatus);
-    
-    webServer.begin();
-    LOG("Web server started on http://192.168.4.1");
+// Función para inicializar el servidor BLE
+void setupBLE() {
+    LOG("[BLE] Inicializando servidor BLE...");
+
+    NimBLEDevice::init(BLE_DEVICE_NAME);
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+    pBLEServer = NimBLEDevice::createServer();
+    pBLEServer->setCallbacks(new PixieBLEServerCallbacks());
+
+    // Crear servicio con el UUID que espera la app
+    NimBLEService* pService = pBLEServer->createService(SERVICE_UUID);
+
+    // Característica para recibir credenciales WiFi (Write)
+    pWifiCredentialsChar = pService->createCharacteristic(
+        WIFI_CREDENTIALS_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE
+    );
+    pWifiCredentialsChar->setCallbacks(new WifiCredentialsCallback());
+
+    // Característica para enviar respuesta (Read + Notify)
+    pResponseChar = pService->createCharacteristic(
+        RESPONSE_CHAR_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+    );
+    // Inicializar con valor vacío para evitar basura
+    pResponseChar->setValue("");
+
+    pService->start();
+
+    // Configurar advertising
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->start();
+
+    LOGF("[BLE] Servidor BLE iniciado - Device name: %s", BLE_DEVICE_NAME);
+    LOG("[BLE] Esperando conexión de la app...");
 }
 
-// Función para iniciar el modo AP
-void startAPMode() {
-    apMode = true;
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP("frame.", "12345678");
-    
-    IPAddress IP = WiFi.softAPIP();
-    LOGF("AP IP address: %s", IP.toString().c_str());
-    
-    setupWebServer();
-    showAPCredentials("frame.", "12345678");
-}
-
-// Función para procesar las credenciales recibidas por Serial
-bool processCredentials(String input) {
-    // Formato esperado: #SSID;ssid#PASS;contraseña
-    if (!input.startsWith("#SSID;")) {
+// Función para procesar credenciales BLE y conectar a WiFi
+bool processBLECredentials() {
+    if (!bleCredentialsReceived) {
         return false;
     }
 
-    // Extraer SSID
-    int ssidStart = input.indexOf("#SSID;") + 6;
-    int ssidEnd = input.indexOf("#PASS;");
-    String ssid = input.substring(ssidStart, ssidEnd);
+    LOG("[BLE] Procesando credenciales recibidas");
 
-    // Extraer contraseña
-    int passStart = ssidEnd + 6;
-    String password = input.substring(passStart);
+    // Guardar credenciales en Preferences
+    preferences.putString("ssid", bleReceivedSSID);
+    preferences.putString("password", bleReceivedPassword);
 
-    // Guardar las credenciales
-    preferences.putString("ssid", ssid);
-    preferences.putString("password", password);
+    // Responder INMEDIATAMENTE con el frameToken (MAC)
+    // La app usará este token para hacer polling al backend
+    String frameToken = WiFi.macAddress();
+    LOGF("[BLE] Enviando frameToken inmediatamente: %s", frameToken.c_str());
+    sendBLEResponse(true, frameToken);
 
-    return true;
+    // Dar tiempo para que se envíe la respuesta BLE
+    delay(BLE_RESPONSE_DELAY);
+
+    // Detener BLE ANTES de intentar WiFi (comparten radio)
+    LOG("[BLE] Deteniendo servidor BLE...");
+    NimBLEDevice::deinit(true);
+    pBLEServer = nullptr;
+    pWifiCredentialsChar = nullptr;
+    pResponseChar = nullptr;
+
+    // Ahora intentar conectar a WiFi (sin BLE activo)
+    showLoadingMsg("Connecting WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(bleReceivedSSID.c_str(), bleReceivedPassword.c_str());
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < BLE_WIFI_CONNECT_TIMEOUT) {
+        delay(500);
+        attempts++;
+        esp_task_wdt_reset();
+        LOGF_NL("[BLE] Conectando a WiFi... intento %d/%d\r", attempts, BLE_WIFI_CONNECT_TIMEOUT);
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+        LOGF("[BLE] WiFi conectado exitosamente. IP: %s", WiFi.localIP().toString().c_str());
+        return true;
+    } else {
+        // Fallo - limpiar credenciales y reiniciar para volver a modo BLE
+        LOG("[BLE] Error: no se pudo conectar a WiFi");
+        preferences.putString("ssid", "");
+        preferences.putString("password", "");
+
+        showLoadingMsg("WiFi Error");
+        delay(2000);
+        showLoadingMsg("Restarting...");
+        delay(1000);
+
+        // Reiniciar para volver al modo BLE
+        ESP.restart();
+        return false;
+    }
 }
+
+// ===== FIN FUNCIONES BLE =====
 
 void showActivationCode(String code) {
     dma_display->clearScreen();
@@ -2273,42 +2209,74 @@ void setup()
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
     activationCode = preferences.getString("code", "0000");
 
-    // Si no hay credenciales guardadas, iniciar modo AP
+    // Si no hay credenciales guardadas, iniciar modo BLE para provisioning
     if (storedSSID == "") {
-        LOG("No WiFi credentials found. Starting AP mode...");
-        startAPMode();
-        return; // Sale del setup, el modo AP seguirá corriendo en el loop
-    }
+        LOG("No WiFi credentials found. Starting BLE provisioning...");
 
-    // Intentar conectar a WiFi
-    LOG("Conectando a WiFi...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
+        // Iniciar servidor BLE
+        setupBLE();
 
-    unsigned long startAttemptTime = millis();
-    dma_display->clearScreen();
-    dma_display->fillScreen(myWHITE);
-    drawLogo();  // Dibujar logo solo una vez
+        // Mostrar mensaje de espera en pantalla
+        dma_display->clearScreen();
+        dma_display->fillScreen(myWHITE);
+        drawLogo();
+        showLoadingMsg("Waiting BLE...");
 
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
-        showLoadingMsg("Connecting WiFi");
-        delay(100);
-    }
+        // Esperar credenciales via BLE
+        while (!processBLECredentials()) {
+            esp_task_wdt_reset();
+            delay(100);
+        }
 
-    if (WiFi.status() != WL_CONNECTED) {
-        LOG("Failed to connect to WiFi. Starting AP mode...");
-        startAPMode();
-        return; // Sale del setup, el modo AP seguirá corriendo en el loop
+        // Si llegamos aquí, el WiFi está conectado via BLE
+        LOG("WiFi conectado via BLE provisioning");
+        showLoadingMsg("Connected!");
     } else {
-        LOG("WiFi connected OK");
-        showLoadingMsg("Connected to WiFi");
+        // Hay credenciales guardadas, intentar conectar a WiFi
+        LOG("Conectando a WiFi...");
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
 
-        // Configuración de MQTT (sin TLS para puerto 1883)
-        mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
-        mqttClient.setCallback(mqttCallback);
-        mqttClient.setKeepAlive(60);  // Keep-alive de 60 segundos
-        mqttClient.setBufferSize(16384); // Buffer grande para fotos (12KB) y covers (8KB) via MQTT
+        unsigned long startAttemptTime = millis();
+        dma_display->clearScreen();
+        dma_display->fillScreen(myWHITE);
+        drawLogo();
+
+        while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
+            showLoadingMsg("Connecting WiFi");
+            delay(100);
+        }
+
+        if (WiFi.status() != WL_CONNECTED) {
+            LOG("Failed to connect to WiFi. Starting BLE provisioning...");
+
+            // Limpiar credenciales guardadas (pueden estar incorrectas)
+            preferences.putString("ssid", "");
+            preferences.putString("password", "");
+
+            // Iniciar servidor BLE
+            setupBLE();
+            showLoadingMsg("Waiting BLE...");
+
+            // Esperar credenciales via BLE
+            while (!processBLECredentials()) {
+                esp_task_wdt_reset();
+                delay(100);
+            }
+
+            LOG("WiFi conectado via BLE provisioning (reconexión)");
+            showLoadingMsg("Connected!");
+        } else {
+            LOG("WiFi connected OK");
+            showLoadingMsg("Connected to WiFi");
+        }
     }
+
+    // Configuración de MQTT (sin TLS para puerto 1883)
+    mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
+    mqttClient.setCallback(mqttCallback);
+    mqttClient.setKeepAlive(60);  // Keep-alive de 60 segundos
+    mqttClient.setBufferSize(16384); // Buffer grande para fotos (12KB) y covers (8KB) via MQTT
 
     // Configuración de OTA
     ArduinoOTA.setHostname(("Pixie-" + String(pixieId)).c_str());
@@ -2359,9 +2327,14 @@ void setup()
         LOG("Modo DEV activo - saltando comprobación inicial de actualizaciones");
     }
 
-    // Register Pixie if not registered
+    // Register Pixie if not registered (via MQTT)
     if (pixieId == 0) {
-        registerPixie();
+        showLoadingMsg("Registering...");
+        if (!registerPixieViaMQTT()) {
+            LOG("Error registrando pixie via MQTT, reintentando...");
+            delay(2000);
+            registerPixieViaMQTT();  // Un reintento
+        }
     }
 
     // Conectar a MQTT
@@ -2380,6 +2353,26 @@ void setup()
     LOG("Watchdog timer inicializado");
 
     showLoadingMsg("Ready!");
+    delay(500);
+
+    // Comprobar si hay música sonando antes de mostrar la primera foto
+    if (allowSpotify) {
+        LOG("[Startup] Comprobando si hay música sonando...");
+        String initialSong = fetchSongId();
+        if (initialSong != "" && initialSong != "null") {
+            LOG("[Startup] Música detectada - mostrando portada");
+            songShowing = initialSong;
+            fetchAndDrawCover();
+        } else {
+            LOG("[Startup] No hay música - mostrando primera foto");
+            showPhotoIndex(0);
+            lastPhotoChange = millis();
+        }
+    } else {
+        LOG("[Startup] Spotify deshabilitado - mostrando primera foto");
+        showPhotoIndex(0);
+        lastPhotoChange = millis();
+    }
 }
 
 String songOnline = "";
@@ -2387,21 +2380,6 @@ String songOnline = "";
 void loop()
 {
     esp_task_wdt_reset();
-
-    // Si estamos en modo AP, manejar el servidor web
-    if (apMode) {
-        webServer.handleClient();
-        
-        // Refrescar la pantalla cada 5 segundos para mantener visible la información
-        static unsigned long lastRefresh = 0;
-        if (millis() - lastRefresh > 5000) {
-            showAPCredentials("frame.", "12345678");
-            lastRefresh = millis();
-        }
-        
-        delay(10);
-        return;
-    }
 
     // Manejo de MQTT
     if (!mqttClient.connected()) {
