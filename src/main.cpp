@@ -2366,11 +2366,13 @@ void setup()
         } else {
             LOG("[Startup] No hay música - mostrando primera foto");
             showPhotoIndex(0);
+            photoIndex = 1;
             lastPhotoChange = millis();
         }
     } else {
         LOG("[Startup] Spotify deshabilitado - mostrando primera foto");
         showPhotoIndex(0);
+        photoIndex = 1;
         lastPhotoChange = millis();
     }
 }
@@ -2418,11 +2420,13 @@ void loop()
                 lastPhotoChange = 0;  // Forzar cambio de foto inmediato
             }
             if (millis() - lastPhotoChange >= secsPhotos) {
-                showPhotoIndex(photoIndex++);
-                lastPhotoChange = millis();
                 if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
+                LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
+                showPhotoIndex(photoIndex);
+                photoIndex++;
+                lastPhotoChange = millis();
             }
         } else {
             if (songShowing != songOnline) {
@@ -2432,11 +2436,13 @@ void loop()
         }
     } else {
         if (millis() - lastPhotoChange >= secsPhotos) {
-            showPhotoIndex(photoIndex++);
-            lastPhotoChange = millis();
             if (photoIndex >= maxPhotos) {
                 photoIndex = 0;
             }
+            LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
+            showPhotoIndex(photoIndex);
+            photoIndex++;
+            lastPhotoChange = millis();
         }
     }
     
