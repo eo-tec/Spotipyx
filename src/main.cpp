@@ -61,7 +61,7 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = true;
+const bool DEV = false;
 const char *serverUrl = DEV ? "http://192.168.18.148:3000/" : "https://api.mypixelframe.com/";
 
 // Variable para controlar el reset automático al arrancar
