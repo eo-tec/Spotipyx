@@ -77,6 +77,15 @@ unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
 String activationCode = "0000";
 
+// Variables para horario de encendido/apagado
+bool scheduleEnabled = false;
+int scheduleOnHour = 8;
+int scheduleOnMinute = 0;
+int scheduleOffHour = 22;
+int scheduleOffMinute = 0;
+int timezoneOffset = 0;  // Offset en minutos desde UTC (recibido del servidor)
+bool screenOff = false;
+
 // Variables para el scroll del título
 String currentTitle = "";
 String currentName = "";
@@ -448,6 +457,7 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000
 void processPendingPhoto();
 void onReceiveNewPic(int id);
 void mqttCallback(char *topic, byte *payload, unsigned int length);
+bool processBLECredentialsNonBlocking();
 
 // Cliente WiFi reutilizable para HTTP (getPixie, registerPixie, OTA download)
 static WiFiClientSecure *httpClient = nullptr;
@@ -1456,6 +1466,36 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putString("code", activationCode);
                 LOGF("[MQTT] Config code: %s", activationCode.c_str());
             }
+            if (doc.containsKey("schedule_enabled")) {
+                scheduleEnabled = doc["schedule_enabled"];
+                preferences.putBool("scheduleEnabled", scheduleEnabled);
+                LOGF("[MQTT] Config schedule enabled: %s", scheduleEnabled ? "true" : "false");
+            }
+            if (doc.containsKey("schedule_on_hour")) {
+                scheduleOnHour = doc["schedule_on_hour"];
+                preferences.putInt("scheduleOnHour", scheduleOnHour);
+                LOGF("[MQTT] Config schedule on hour: %d", scheduleOnHour);
+            }
+            if (doc.containsKey("schedule_on_minute")) {
+                scheduleOnMinute = doc["schedule_on_minute"];
+                preferences.putInt("scheduleOnMinute", scheduleOnMinute);
+                LOGF("[MQTT] Config schedule on minute: %d", scheduleOnMinute);
+            }
+            if (doc.containsKey("schedule_off_hour")) {
+                scheduleOffHour = doc["schedule_off_hour"];
+                preferences.putInt("scheduleOffHour", scheduleOffHour);
+                LOGF("[MQTT] Config schedule off hour: %d", scheduleOffHour);
+            }
+            if (doc.containsKey("schedule_off_minute")) {
+                scheduleOffMinute = doc["schedule_off_minute"];
+                preferences.putInt("scheduleOffMinute", scheduleOffMinute);
+                LOGF("[MQTT] Config schedule off minute: %d", scheduleOffMinute);
+            }
+            if (doc.containsKey("timezone_offset")) {
+                timezoneOffset = doc["timezone_offset"];
+                preferences.putInt("timezoneOffset", timezoneOffset);
+                LOGF("[MQTT] Config timezone offset: %d", timezoneOffset);
+            }
             mqttResponseSuccess = true;
             LOG("[MQTT] Configuración recibida correctamente");
         } else {
@@ -1583,6 +1623,36 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     preferences.putString("code", activationCode);
                     LOGF("[MQTT] Code: %s", activationCode.c_str());
                 }
+                if (doc.containsKey("schedule_enabled")) {
+                    scheduleEnabled = doc["schedule_enabled"];
+                    preferences.putBool("scheduleEnabled", scheduleEnabled);
+                    LOGF("[MQTT] Schedule enabled: %s", scheduleEnabled ? "true" : "false");
+                }
+                if (doc.containsKey("schedule_on_hour")) {
+                    scheduleOnHour = doc["schedule_on_hour"];
+                    preferences.putInt("scheduleOnHour", scheduleOnHour);
+                    LOGF("[MQTT] Schedule on hour: %d", scheduleOnHour);
+                }
+                if (doc.containsKey("schedule_on_minute")) {
+                    scheduleOnMinute = doc["schedule_on_minute"];
+                    preferences.putInt("scheduleOnMinute", scheduleOnMinute);
+                    LOGF("[MQTT] Schedule on minute: %d", scheduleOnMinute);
+                }
+                if (doc.containsKey("schedule_off_hour")) {
+                    scheduleOffHour = doc["schedule_off_hour"];
+                    preferences.putInt("scheduleOffHour", scheduleOffHour);
+                    LOGF("[MQTT] Schedule off hour: %d", scheduleOffHour);
+                }
+                if (doc.containsKey("schedule_off_minute")) {
+                    scheduleOffMinute = doc["schedule_off_minute"];
+                    preferences.putInt("scheduleOffMinute", scheduleOffMinute);
+                    LOGF("[MQTT] Schedule off minute: %d", scheduleOffMinute);
+                }
+                if (doc.containsKey("timezone_offset")) {
+                    timezoneOffset = doc["timezone_offset"];
+                    preferences.putInt("timezoneOffset", timezoneOffset);
+                    LOGF("[MQTT] Timezone offset: %d", timezoneOffset);
+                }
             }
             else if (strcmp(action, "update_bin") == 0)
             {
@@ -1635,7 +1705,14 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 activationCode = "0000";
                 currentVersion = 0;
                 pixieId = 0;
-                
+                scheduleEnabled = false;
+                scheduleOnHour = 8;
+                scheduleOnMinute = 0;
+                scheduleOffHour = 22;
+                scheduleOffMinute = 0;
+                timezoneOffset = 0;
+                screenOff = false;
+
                 showLoadingMsg("Env Vars Reset!");
                 delay(2000);
                 dma_display->clearScreen();
@@ -2017,20 +2094,69 @@ bool processBLECredentials() {
         LOGF("[BLE] WiFi conectado exitosamente. IP: %s", WiFi.localIP().toString().c_str());
         return true;
     } else {
-        // Fallo - limpiar credenciales y reiniciar para volver a modo BLE
+        // Fallo - NO borrar credenciales, reiniciar para volver a modo BLE + reintentos WiFi
         LOG("[BLE] Error: no se pudo conectar a WiFi");
-        preferences.putString("ssid", "");
-        preferences.putString("password", "");
+        // Las credenciales se mantienen guardadas para reintentos automáticos
 
         showLoadingMsg("WiFi Error");
         delay(2000);
         showLoadingMsg("Restarting...");
         delay(1000);
 
-        // Reiniciar para volver al modo BLE
+        // Reiniciar para volver al modo BLE con reintentos WiFi
         ESP.restart();
         return false;
     }
+}
+
+// Versión no-bloqueante para usar en el loop de espera BLE + WiFi retry
+bool processBLECredentialsNonBlocking() {
+    if (!bleCredentialsReceived) {
+        return false;
+    }
+
+    LOG("[BLE] Procesando credenciales recibidas (non-blocking)");
+
+    // Guardar credenciales en Preferences
+    preferences.putString("ssid", bleReceivedSSID);
+    preferences.putString("password", bleReceivedPassword);
+
+    // Responder INMEDIATAMENTE con el frameToken (MAC)
+    String frameToken = WiFi.macAddress();
+    LOGF("[BLE] Enviando frameToken: %s", frameToken.c_str());
+    sendBLEResponse(true, frameToken);
+
+    // Dar tiempo para que se envíe la respuesta BLE
+    delay(BLE_RESPONSE_DELAY);
+
+    // Detener BLE ANTES de intentar WiFi (comparten radio)
+    LOG("[BLE] Deteniendo servidor BLE...");
+    NimBLEDevice::stopAdvertising();
+
+    // Intentar conectar a WiFi
+    showLoadingMsg("Connecting WiFi...");
+    WiFi.begin(bleReceivedSSID.c_str(), bleReceivedPassword.c_str());
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        esp_task_wdt_reset();
+        delay(100);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        LOGF("[BLE] WiFi conectado! IP: %s", WiFi.localIP().toString().c_str());
+        NimBLEDevice::deinit(true); // Apagar BLE completamente
+        return true;
+    }
+
+    // Fallo - NO borrar credenciales, reanudar BLE
+    LOG("[BLE] WiFi fallo. Reanudando BLE...");
+    bleCredentialsReceived = false;
+    NimBLEDevice::startAdvertising();
+    showLoadingMsg("WiFi Error");
+    delay(1000);
+    showLoadingMsg("Waiting BLE...");
+    return false;
 }
 
 // ===== FIN FUNCIONES BLE =====
@@ -2208,6 +2334,13 @@ void setup()
     pixieId = preferences.getInt("pixieId", 0);
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
     activationCode = preferences.getString("code", "0000");
+    // Cargar configuración de horario
+    scheduleEnabled = preferences.getBool("scheduleEnabled", false);
+    scheduleOnHour = preferences.getInt("scheduleOnHour", 8);
+    scheduleOnMinute = preferences.getInt("scheduleOnMinute", 0);
+    scheduleOffHour = preferences.getInt("scheduleOffHour", 22);
+    scheduleOffMinute = preferences.getInt("scheduleOffMinute", 0);
+    timezoneOffset = preferences.getInt("timezoneOffset", 0);
 
     // Si no hay credenciales guardadas, iniciar modo BLE para provisioning
     if (storedSSID == "") {
@@ -2248,23 +2381,58 @@ void setup()
         }
 
         if (WiFi.status() != WL_CONNECTED) {
-            LOG("Failed to connect to WiFi. Starting BLE provisioning...");
+            LOG("Failed to connect to WiFi. Starting BLE provisioning + WiFi retry mode...");
 
-            // Limpiar credenciales guardadas (pueden estar incorrectas)
-            preferences.putString("ssid", "");
-            preferences.putString("password", "");
+            // NO borrar credenciales - pueden ser correctas pero WiFi puede estar caído
+            // El usuario podrá enviar nuevas credenciales via BLE si lo desea
 
             // Iniciar servidor BLE
             setupBLE();
             showLoadingMsg("Waiting BLE...");
 
-            // Esperar credenciales via BLE
-            while (!processBLECredentials()) {
+            // Variables para reintentar WiFi periódicamente
+            unsigned long lastWiFiAttempt = 0;
+            const unsigned long WIFI_RETRY_INTERVAL = 180000; // 3 minutos
+
+            // Esperar credenciales via BLE o reconexión WiFi
+            while (true) {
                 esp_task_wdt_reset();
+
+                // Procesar BLE (no bloqueante)
+                if (processBLECredentialsNonBlocking()) {
+                    break; // Nuevas credenciales recibidas y WiFi conectado
+                }
+
+                // Intentar WiFi con credenciales existentes cada 3 minutos
+                if (storedSSID != "" && millis() - lastWiFiAttempt >= WIFI_RETRY_INTERVAL) {
+                    lastWiFiAttempt = millis();
+                    LOG("[WiFi] Intentando reconectar con credenciales guardadas...");
+
+                    // Pausar BLE temporalmente
+                    NimBLEDevice::stopAdvertising();
+
+                    WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
+                    unsigned long start = millis();
+                    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+                        esp_task_wdt_reset();
+                        delay(100);
+                    }
+
+                    if (WiFi.status() == WL_CONNECTED) {
+                        LOG("[WiFi] Reconectado!");
+                        NimBLEDevice::deinit(true); // Apagar BLE
+                        break;
+                    }
+
+                    // Reanudar BLE
+                    NimBLEDevice::startAdvertising();
+                    LOG("[WiFi] Fallo. Continuando en modo BLE...");
+                }
+
                 delay(100);
             }
 
-            LOG("WiFi conectado via BLE provisioning (reconexión)");
+            LOG("WiFi conectado (via BLE o reconexión)");
             showLoadingMsg("Connected!");
         } else {
             LOG("WiFi connected OK");
@@ -2379,6 +2547,60 @@ void setup()
 
 String songOnline = "";
 
+// Función para verificar si la hora actual está dentro del horario de encendido
+bool isWithinSchedule() {
+    if (!scheduleEnabled) {
+        return true;  // Si el horario no está habilitado, siempre encendido
+    }
+
+    // Obtener hora UTC del NTPClient
+    timeClient.update();
+    int utcHours = timeClient.getHours();
+    int utcMinutes = timeClient.getMinutes();
+    int utcTotalMinutes = utcHours * 60 + utcMinutes;
+
+    // Aplicar timezone offset para obtener hora local
+    int localTotalMinutes = (utcTotalMinutes + timezoneOffset + 24 * 60) % (24 * 60);
+    int localHour = localTotalMinutes / 60;
+    int localMinute = localTotalMinutes % 60;
+
+    // Convertir horarios de encendido y apagado a minutos totales
+    int onTimeMinutes = scheduleOnHour * 60 + scheduleOnMinute;
+    int offTimeMinutes = scheduleOffHour * 60 + scheduleOffMinute;
+    int currentTimeMinutes = localHour * 60 + localMinute;
+
+    // Caso normal: encendido antes que apagado (ej: 8:00 a 22:00)
+    if (onTimeMinutes < offTimeMinutes) {
+        return currentTimeMinutes >= onTimeMinutes && currentTimeMinutes < offTimeMinutes;
+    }
+    // Caso nocturno: encendido después que apagado (ej: 22:00 a 8:00)
+    else if (onTimeMinutes > offTimeMinutes) {
+        return currentTimeMinutes >= onTimeMinutes || currentTimeMinutes < offTimeMinutes;
+    }
+    // Caso igual: siempre encendido
+    return true;
+}
+
+// Función para actualizar el estado de la pantalla según el horario
+void updateScreenPower() {
+    bool shouldBeOn = isWithinSchedule();
+
+    if (shouldBeOn && screenOff) {
+        // Encender pantalla
+        LOG("[Schedule] Encendiendo pantalla");
+        dma_display->setBrightness(max(brightness, 10));
+        screenOff = false;
+        // Forzar mostrar foto inmediatamente
+        lastPhotoChange = 0;
+    } else if (!shouldBeOn && !screenOff) {
+        // Apagar pantalla
+        LOG("[Schedule] Apagando pantalla");
+        dma_display->clearScreen();
+        dma_display->setBrightness(0);
+        screenOff = true;
+    }
+}
+
 void loop()
 {
     esp_task_wdt_reset();
@@ -2388,7 +2610,17 @@ void loop()
         mqttReconnect();
     }else{
         mqttClient.loop();
-    }    
+    }
+
+    // Verificar y actualizar estado de la pantalla según el horario
+    updateScreenPower();
+
+    // Si la pantalla está apagada, solo procesar OTA y MQTT
+    if (screenOff) {
+        ArduinoOTA.handle();
+        delay(100);
+        return;
+    }
 
     // Verificar timeout del modo dibujo
     checkDrawingTimeout();
@@ -2399,7 +2631,7 @@ void loop()
         if (millis() - lastDrawingUpdate >= DRAWING_UPDATE_INTERVAL) {
             processDrawingBuffer();
         }
-        
+
         ArduinoOTA.handle();
         delay(10);
         return;
