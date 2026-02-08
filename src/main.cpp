@@ -86,6 +86,10 @@ int scheduleOffMinute = 0;
 int timezoneOffset = 0;  // Offset en minutos desde UTC (recibido del servidor)
 bool screenOff = false;
 
+// Variables para el reloj overlay
+bool clockEnabled = false;
+unsigned long lastClockUpdate = 0;
+
 // Variables para el scroll del título
 String currentTitle = "";
 String currentName = "";
@@ -529,6 +533,7 @@ void fetchAndDrawCover()
         currentTitle = "";
         currentName = "";
         loadingMsg = "";
+        showClockOverlay();
     }
     else
     {
@@ -851,6 +856,39 @@ void showPhotoInfo(String title, String name)
     }
 }
 
+// Función para mostrar el reloj overlay en la esquina superior derecha
+void showClockOverlay() {
+    if (!clockEnabled) return;
+
+    timeClient.update();
+    int utcHours = timeClient.getHours();
+    int utcMinutes = timeClient.getMinutes();
+    int utcTotalMinutes = utcHours * 60 + utcMinutes;
+    int localTotalMinutes = (utcTotalMinutes + timezoneOffset + 24 * 60) % (24 * 60);
+    int localHour = localTotalMinutes / 60;
+    int localMinute = localTotalMinutes % 60;
+
+    String timeStr = String(localHour < 10 ? "0" : "") + String(localHour) + ":" +
+                     String(localMinute < 10 ? "0" : "") + String(localMinute);
+
+    dma_display->setFont(&Picopixel);
+    dma_display->setTextSize(1);
+
+    // Medir texto para posicionar a la derecha
+    int16_t x1, y1;
+    uint16_t w, h;
+    dma_display->getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
+
+    int xPos = PANEL_RES_X - w - 2;  // 2px margen derecho
+    int yPos = h + 1;                  // 1px margen superior
+
+    // Fondo negro para legibilidad
+    dma_display->fillRect(xPos - 1, 0, w + 3, h + 2, myBLACK);
+    dma_display->setTextColor(myWHITE);
+    dma_display->setCursor(xPos, yPos);
+    dma_display->print(timeStr);
+}
+
 // Función auxiliar para mostrar foto desde photoBuffer (ya descargada via MQTT)
 void displayPhotoWithFade()
 {
@@ -876,6 +914,7 @@ void displayPhotoWithFade()
 
     fadeIn();
     showPhotoInfo(String(photoTitle), String(photoAuthor));
+    showClockOverlay();
 }
 
 // Función para mostrar foto por índice (via MQTT)
@@ -1496,6 +1535,11 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putInt("timezoneOffset", timezoneOffset);
                 LOGF("[MQTT] Config timezone offset: %d", timezoneOffset);
             }
+            if (doc.containsKey("clock_enabled")) {
+                clockEnabled = doc["clock_enabled"];
+                preferences.putBool("clockEnabled", clockEnabled);
+                LOGF("[MQTT] Config clock enabled: %s", clockEnabled ? "true" : "false");
+            }
             mqttResponseSuccess = true;
             LOG("[MQTT] Configuración recibida correctamente");
         } else {
@@ -1652,6 +1696,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     timezoneOffset = doc["timezone_offset"];
                     preferences.putInt("timezoneOffset", timezoneOffset);
                     LOGF("[MQTT] Timezone offset: %d", timezoneOffset);
+                }
+                if (doc.containsKey("clock_enabled")) {
+                    clockEnabled = doc["clock_enabled"];
+                    preferences.putBool("clockEnabled", clockEnabled);
+                    LOGF("[MQTT] Clock enabled: %s", clockEnabled ? "true" : "false");
                 }
             }
             else if (strcmp(action, "update_bin") == 0)
@@ -2341,6 +2390,7 @@ void setup()
     scheduleOffHour = preferences.getInt("scheduleOffHour", 22);
     scheduleOffMinute = preferences.getInt("scheduleOffMinute", 0);
     timezoneOffset = preferences.getInt("timezoneOffset", 0);
+    clockEnabled = preferences.getBool("clockEnabled", false);
 
     // Si no hay credenciales guardadas, iniciar modo BLE para provisioning
     if (storedSSID == "") {
@@ -2680,6 +2730,12 @@ void loop()
     
     // Actualizar el scroll del título si es necesario
     updatePhotoInfo();
-    
+
+    // Actualizar reloj cada 60 segundos
+    if (clockEnabled && millis() - lastClockUpdate >= 60000) {
+        showClockOverlay();
+        lastClockUpdate = millis();
+    }
+
     wait(100); // Reducido de 1000ms a 100ms para mejor respuesta
 }
