@@ -478,6 +478,9 @@ void ensureHttpClient() {
     }
 }
 
+// Forward declaration
+void showClockOverlay();
+
 // Función para descargar y mostrar la portada (via MQTT)
 void fetchAndDrawCover()
 {
