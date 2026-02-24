@@ -2370,6 +2370,8 @@ void setup()
     HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
     mxconfig.gpio.e = E_PIN;
     mxconfig.clkphase = false;
+    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;   // 20MHz para mayor refresh rate
+    mxconfig.min_refresh_rate = 200;               // Min 200Hz para evitar flicker en cámaras
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
     dma_display->setBrightness8(max(brightness, 10));
