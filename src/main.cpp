@@ -54,6 +54,7 @@ uint16_t color4 = 0xF680; // F6801A
 uint16_t color5 = 0xF746; // F74633
 
 int brightness = 10;
+bool startupBrightnessRampDone = false;  // Bloquea setBrightness hasta que la rampa se complete
 int wifiBrightness = 0;
 int maxIndex = 5;
 int maxPhotos = 5;
@@ -1483,7 +1484,9 @@ void handleConfigResponse(byte* payload, unsigned int length) {
         if (deserializeJson(doc, httpBuffer) == DeserializationError::Ok) {
             if (doc.containsKey("brightness")) {
                 brightness = doc["brightness"];
-                dma_display->setBrightness(max(brightness, 10));
+                if (startupBrightnessRampDone) {
+                    dma_display->setBrightness(max(brightness, 10));
+                }
                 preferences.putInt("brightness", brightness);
                 LOGF("[MQTT] Config brightness: %d", brightness);
             }
@@ -1645,7 +1648,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 // Leer configuración directamente del payload MQTT
                 if (doc.containsKey("brightness")) {
                     brightness = doc["brightness"];
-                    dma_display->setBrightness(max(brightness, 10));
+                    if (startupBrightnessRampDone) {
+                        dma_display->setBrightness(max(brightness, 10));
+                    }
                     preferences.putInt("brightness", brightness);
                     LOGF("[MQTT] Brightness: %d", brightness);
                 }
@@ -2374,7 +2379,7 @@ void setup()
     mxconfig.min_refresh_rate = 200;               // Min 200Hz para evitar flicker en cámaras
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
-    dma_display->setBrightness8(max(brightness, 10));
+    dma_display->setBrightness8(1);  // Arrancar con brillo mínimo para evitar brownout
     dma_display->clearScreen();
     dma_display->setRotation(135);
 
@@ -2566,6 +2571,18 @@ void setup()
 
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
+
+    // Rampa gradual de brillo para evitar brownout por pico de corriente
+    {
+        int targetBrightness = max(brightness, 10);
+        LOG("[Startup] Rampa de brillo...");
+        for (int b = 1; b <= targetBrightness; b++) {
+            dma_display->setBrightness8(b);
+            delay(5);
+        }
+        startupBrightnessRampDone = true;
+        LOGF("[Startup] Brillo objetivo alcanzado: %d", targetBrightness);
+    }
 
     // Verificar estado de activación
     checkActivation();
