@@ -54,6 +54,7 @@ uint16_t color4 = 0xF680; // F6801A
 uint16_t color5 = 0xF746; // F74633
 
 int brightness = 10;
+bool startupBrightnessRampDone = false;  // Bloquea setBrightness hasta que la rampa se complete
 int wifiBrightness = 0;
 int maxIndex = 5;
 int maxPhotos = 5;
@@ -61,7 +62,7 @@ int currentVersion = 0;
 int pixieId = 0;
 int photoIndex = 0;
 
-const bool DEV = false;
+const bool DEV = true;
 const char *serverUrl = DEV ? "http://192.168.18.148:3000/" : "https://api.mypixelframe.com/";
 
 // Variable para controlar el reset automático al arrancar
@@ -72,7 +73,7 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
 String songShowing = "";
 unsigned long lastPhotoChange = -60000;
-unsigned long secsPhotos = 30000; // 30 segundos por defecto
+unsigned long secsPhotos = 2000; // 2 segundos para testing de crash
 unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
 String activationCode = "0000";
@@ -1483,7 +1484,9 @@ void handleConfigResponse(byte* payload, unsigned int length) {
         if (deserializeJson(doc, httpBuffer) == DeserializationError::Ok) {
             if (doc.containsKey("brightness")) {
                 brightness = doc["brightness"];
-                dma_display->setBrightness(max(brightness, 10));
+                if (startupBrightnessRampDone) {
+                    dma_display->setBrightness(max(brightness, 10));
+                }
                 preferences.putInt("brightness", brightness);
                 LOGF("[MQTT] Config brightness: %d", brightness);
             }
@@ -1497,12 +1500,13 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putBool("allowSpotify", allowSpotify);
                 LOGF("[MQTT] Config spotify: %s", allowSpotify ? "true" : "false");
             }
-            if (doc.containsKey("secs_between_photos")) {
-                int secsBetweenPhotos = doc["secs_between_photos"];
-                secsPhotos = secsBetweenPhotos * 1000;
-                preferences.putUInt("secsPhotos", secsPhotos);
-                LOGF("[MQTT] Config secs between photos: %d", secsBetweenPhotos);
-            }
+            // TESTING: ignorar secs_between_photos de MQTT para mantener 2s
+            // if (doc.containsKey("secs_between_photos")) {
+            //     int secsBetweenPhotos = doc["secs_between_photos"];
+            //     secsPhotos = secsBetweenPhotos * 1000;
+            //     preferences.putUInt("secsPhotos", secsPhotos);
+            //     LOGF("[MQTT] Config secs between photos: %d", secsBetweenPhotos);
+            // }
             if (doc.containsKey("code")) {
                 activationCode = doc["code"].as<String>();
                 preferences.putString("code", activationCode);
@@ -1645,7 +1649,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 // Leer configuración directamente del payload MQTT
                 if (doc.containsKey("brightness")) {
                     brightness = doc["brightness"];
-                    dma_display->setBrightness(max(brightness, 10));
+                    if (startupBrightnessRampDone) {
+                        dma_display->setBrightness(max(brightness, 10));
+                    }
                     preferences.putInt("brightness", brightness);
                     LOGF("[MQTT] Brightness: %d", brightness);
                 }
@@ -1659,12 +1665,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     preferences.putBool("allowSpotify", allowSpotify);
                     LOGF("[MQTT] Spotify enabled: %s", allowSpotify ? "true" : "false");
                 }
-                if (doc.containsKey("secs_between_photos")) {
-                    int secsBetweenPhotos = doc["secs_between_photos"];
-                    secsPhotos = secsBetweenPhotos * 1000;
-                    preferences.putUInt("secsPhotos", secsPhotos);
-                    LOGF("[MQTT] Secs between photos: %d", secsBetweenPhotos);
-                }
+                // TESTING: ignorar secs_between_photos de MQTT para mantener 2s
+                // if (doc.containsKey("secs_between_photos")) {
+                //     int secsBetweenPhotos = doc["secs_between_photos"];
+                //     secsPhotos = secsBetweenPhotos * 1000;
+                //     preferences.putUInt("secsPhotos", secsPhotos);
+                //     LOGF("[MQTT] Secs between photos: %d", secsBetweenPhotos);
+                // }
                 if (doc.containsKey("code")) {
                     activationCode = doc["code"].as<String>();
                     preferences.putString("code", activationCode);
@@ -2374,7 +2381,7 @@ void setup()
     mxconfig.min_refresh_rate = 200;               // Min 200Hz para evitar flicker en cámaras
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
-    dma_display->setBrightness8(max(brightness, 10));
+    dma_display->setBrightness8(1);  // Arrancar con brillo mínimo para evitar brownout
     dma_display->clearScreen();
     dma_display->setRotation(135);
 
@@ -2386,7 +2393,7 @@ void setup()
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
     pixieId = preferences.getInt("pixieId", 0);
-    secsPhotos = preferences.getUInt("secsPhotos", 30000);
+    secsPhotos = 2000; // TESTING: forzar 2 segundos para debug de crash
     activationCode = preferences.getString("code", "0000");
     // Cargar configuración de horario
     scheduleEnabled = preferences.getBool("scheduleEnabled", false);
@@ -2567,6 +2574,18 @@ void setup()
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
 
+    // Rampa gradual de brillo para evitar brownout por pico de corriente
+    {
+        int targetBrightness = max(brightness, 10);
+        LOG("[Startup] Rampa de brillo...");
+        for (int b = 1; b <= targetBrightness; b++) {
+            dma_display->setBrightness8(b);
+            delay(5);
+        }
+        startupBrightnessRampDone = true;
+        LOGF("[Startup] Brillo objetivo alcanzado: %d", targetBrightness);
+    }
+
     // Verificar estado de activación
     checkActivation();
 
@@ -2692,44 +2711,31 @@ void loop()
         return;
     }
 
-    // Si estamos conectados a WiFi, se ejecuta la lógica original:
-    if (allowSpotify) {
-        // Solo llamar a fetchSongId si el scroll no está activo (evita bloquear el scroll)
-        bool scrollActive = titleNeedsScroll && (titleScrollState == SCROLL_SCROLLING || titleScrollState == SCROLL_RETURNING);
-        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive) {
-            songOnline = fetchSongId();
-            lastSpotifyCheck = millis();
-        }
-        if (songOnline == "" || songOnline == "null") {
-            // Si antes había canción y ahora no, mostrar foto inmediatamente
-            if (songShowing != "") {
-                songShowing = "";
-                lastPhotoChange = 0;  // Forzar cambio de foto inmediato
-            }
-            if (millis() - lastPhotoChange >= secsPhotos) {
+    // TESTING: alternar 3 fotos + 1 portada Spotify, cada 2 segundos
+    {
+        static int testCycleCount = 0;
+        static const char* testSongIds[] = {"0vF9TaEJHO0Zm1ejF7AGC0", "07UFnnK3uPIuKv5Rs9TmXl"};
+        static int testSongIndex = 0;
+
+        if (millis() - lastPhotoChange >= secsPhotos) {
+            if (testCycleCount < 3) {
+                // Mostrar foto
                 if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
-                LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
+                LOGF("[TEST] Foto %d/%d (ciclo %d/3)", photoIndex, maxPhotos, testCycleCount + 1);
                 showPhotoIndex(photoIndex);
                 photoIndex++;
                 lastPhotoChange = millis();
-            }
-        } else {
-            if (songShowing != songOnline) {
-                songShowing = songOnline;
+            } else {
+                // Mostrar portada de Spotify
+                LOGF("[TEST] Portada Spotify: %s", testSongIds[testSongIndex]);
+                songShowing = testSongIds[testSongIndex];
                 fetchAndDrawCover();
+                testSongIndex = (testSongIndex + 1) % 2;
+                lastPhotoChange = millis();
             }
-        }
-    } else {
-        if (millis() - lastPhotoChange >= secsPhotos) {
-            if (photoIndex >= maxPhotos) {
-                photoIndex = 0;
-            }
-            LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
-            showPhotoIndex(photoIndex);
-            photoIndex++;
-            lastPhotoChange = millis();
+            testCycleCount = (testCycleCount + 1) % 4;
         }
     }
     
