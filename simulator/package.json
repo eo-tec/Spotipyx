@@ -1,0 +1,27 @@
+{
+  "name": "spotipyx-simulator",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "proxy": "node mqtt-proxy.mjs",
+    "start": "node mqtt-proxy.mjs & vite --open",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "mqtt": "^5.13.3",
+    "puppeteer": "^24.37.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.5"
+  }
+}

@@ -453,6 +453,10 @@ volatile bool mqttResponseReceived = false;
 volatile bool mqttResponseSuccess = false;
 String mqttResponseType = "";
 
+// Request ID para filtrar respuestas duplicadas/stale
+uint32_t mqttRequestId = 0;
+volatile uint32_t mqttResponseRequestId = 0;
+
 // Variables para registro via MQTT
 volatile int mqttRegisterPixieId = 0;
 String mqttRegisterCode = "";
@@ -934,9 +938,12 @@ void showPhoto(int index)
     LOGF("[Photo] Heap libre: %d bytes", ESP.getFreeHeap());
     LOGF("[Photo] Solicitando foto index=%d via MQTT", index);
 
+    // Generar request ID único para filtrar respuestas stale
+    mqttRequestId++;
+
     // Publicar request via MQTT
     String topic = String("pixie/") + String(pixieId) + "/request/photo";
-    String payload = "{\"index\":" + String(index) + "}";
+    String payload = "{\"index\":" + String(index) + ",\"reqId\":" + String(mqttRequestId) + "}";
 
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[Photo] Error publicando request MQTT");
@@ -1365,9 +1372,16 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
         yield();
         delay(10);
 
-        // Solo salir si recibimos la respuesta del tipo esperado
+        // Solo salir si recibimos la respuesta del tipo esperado Y fue exitosa
         if (mqttResponseReceived && mqttResponseType == expectedType) {
-            return mqttResponseSuccess;
+            if (mqttResponseSuccess) {
+                return true;
+            }
+            // Respuesta stale (reqId incorrecto) - seguir esperando la buena
+            LOGF("[MQTT] Respuesta stale descartada, seguimos esperando '%s'", expectedType);
+            mqttResponseReceived = false;
+            mqttResponseType = "";
+            continue;
         }
 
         // Si recibimos respuesta de otro tipo (tardía), ignorarla y seguir esperando
@@ -1426,7 +1440,7 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
     photoTitle[0] = '\0';
     photoAuthor[0] = '\0';
 
-    // Formato: {"title":"x","author":"y"}\n[12288 bytes binarios]
+    // Formato: {"title":"x","author":"y","reqId":N}\n[12288 bytes binarios]
     // Buscar el newline que separa JSON de binario
     int jsonEnd = -1;
     for (unsigned int i = 0; i < min(length, 256u); i++) {
@@ -1444,6 +1458,19 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
 
         JsonDocument doc;
         if (deserializeJson(doc, jsonBuf) == DeserializationError::Ok) {
+            // Filtrar respuestas stale: ignorar si reqId no coincide
+            if (doc.containsKey("reqId")) {
+                uint32_t respReqId = doc["reqId"];
+                if (respReqId != mqttRequestId) {
+                    LOGF("[MQTT] Ignorando foto stale (reqId=%d, esperado=%d): %s",
+                         respReqId, mqttRequestId, (const char*)(doc["title"] | "?"));
+                    mqttResponseReceived = true;
+                    mqttResponseType = "photo";
+                    mqttResponseSuccess = false;
+                    return;
+                }
+            }
+
             strncpy(photoTitle, doc["title"] | "", sizeof(photoTitle) - 1);
             strncpy(photoAuthor, doc["author"] | "", sizeof(photoAuthor) - 1);
             photoTitle[sizeof(photoTitle) - 1] = '\0';
@@ -1453,7 +1480,7 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
         // Copiar datos binarios
         memcpy(photoBuffer, payload + jsonEnd + 1, 12288);
         mqttResponseSuccess = true;
-        LOGF("[MQTT] Foto recibida: %s by %s", photoTitle, photoAuthor);
+        LOGF("[MQTT] Foto recibida (reqId=%d): %s by %s", mqttRequestId, photoTitle, photoAuthor);
     } else {
         LOGF("[MQTT] Foto con formato incorrecto: length=%d, jsonEnd=%d", length, jsonEnd);
         mqttResponseSuccess = false;

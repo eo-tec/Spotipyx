@@ -42,3 +42,5 @@ tools/*.bin
 # OS files
 .DS_Store
 Thumbs.db
+simulator/dist/
+simulator/tsconfig.tsbuildinfo
