@@ -39,6 +39,9 @@ tools/*.gif
 tools/*.bmp
 tools/*.bin
 
+# Credentials
+src/config.h
+
 # OS files
 .DS_Store
 Thumbs.db

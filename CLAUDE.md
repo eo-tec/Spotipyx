@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Spotipyx is an ESP32-based digital photo frame with Spotify integration. The device displays photos and Spotify album covers on a 64x64 LED matrix panel, with features including:
+frame. is an ESP32-based digital photo frame with Spotify integration. The device displays photos and Spotify album covers on a 64x64 LED matrix panel, with features including:
 
 - WiFi connectivity with BLE credential configuration
 - MQTT communication for all server interactions
@@ -24,9 +24,6 @@ pio run
 # Build and upload to ESP32
 pio run --target upload
 
-# Build and upload via OTA
-pio run --target upload --environment ota
-
 # Open serial monitor
 pio device monitor
 
@@ -44,14 +41,13 @@ pio run --target clean
 - Handles photo cycling and Spotify integration
 - Implements OTA updates and device registration
 
-**frame. Library (`lib/Pixie/`)**
-- Provides API abstraction for server communication
-- Contains static utility functions for display operations
-- Handles MQTT communication with the backend server
-
 **Display Assets (`src/pics.h`)**
 - Contains bitmap data for WiFi icons and logos
 - Defines various display states and animations
+
+**Configuration (`src/config.h`)**
+- Contains MQTT broker credentials and API server URLs
+- Gitignored — copy `src/config.h.example` to get started
 
 ### Key Architecture Details
 
@@ -62,7 +58,7 @@ pio run --target clean
 
 **Network Communication**
 - **WiFi Configuration**: BLE-based setup for credential input
-- MQTT client connects to HiveMQ cloud broker for all server communication
+- MQTT client connects to broker for all server communication
 - All API interactions handled via MQTT (no HTTP/HTTPS)
 
 **WiFi Setup System**
@@ -77,7 +73,7 @@ pio run --target clean
 
 **Configuration Management**
 - Uses ESP32 Preferences library for persistent storage
-- Stores WiFi credentials, device settings, and Pixie ID
+- Stores WiFi credentials, device settings, and frame ID
 - Configurable photo display intervals and Spotify integration
 
 ### Important Constants
@@ -85,15 +81,14 @@ pio run --target clean
 - Panel resolution: 64x64 pixels
 - Serial baud rate: 115200
 - Default photo interval: 30 seconds
-- MQTT broker: HiveMQ cloud (TLS on port 8883)
 
 ### Device Registration
 
-The device registers with the backend using its MAC address and receives a unique frame. ID for identification in MQTT topics.
+The device registers with the backend using its MAC address and receives a unique frame ID for identification in MQTT topics.
 
 ## Development Notes
 
-- All server communication is handled via MQTT over TLS
+- All server communication is handled via MQTT
 - OTA updates are supported with progress display on the LED matrix
 - BLE-based WiFi configuration for user-friendly setup experience
 - Serial communication is available for debugging

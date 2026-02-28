@@ -15,18 +15,15 @@
 #include <esp_task_wdt.h>
 #include <NimBLEDevice.h>
 #include "ble_config.h"
+#include "config.h"
 
 // Macros de logging con timestamp
 #define LOG(msg) Serial.printf("[%lu] %s\n", millis(), msg)
 #define LOGF(fmt, ...) Serial.printf("[%lu] " fmt "\n", millis(), ##__VA_ARGS__)
 #define LOGF_NL(fmt, ...) Serial.printf("[%lu] " fmt, millis(), ##__VA_ARGS__)
 
-// Configuración MQTT
-const char *MQTT_BROKER_URL = "mqtt.mypixelframe.com";
-const int MQTT_BROKER_PORT = 1883;
-const char *MQTT_BROKER_USERNAME = "server";
-const char *MQTT_BROKER_PASSWORD = "Test1234!";
-const char *MQTT_CLIENT_ID = "pixie-"; // Se completará con el ID del pixie
+// MQTT Client ID prefix
+#define MQTT_CLIENT_ID "frame-"
 
 WiFiClient mqttClientWiFi;
 PubSubClient mqttClient(mqttClientWiFi);
@@ -59,14 +56,11 @@ int wifiBrightness = 0;
 int maxIndex = 5;
 int maxPhotos = 5;
 int currentVersion = 0;
-int pixieId = 0;
+int frameId = 0;
 int photoIndex = 0;
 
 const bool DEV = false;
-const char *serverUrl = DEV ? "http://192.168.18.148:3000/" : "https://api.mypixelframe.com/";
-
-// Variable para controlar el reset automático al arrancar
-const bool AUTO_RESET_ON_STARTUP = false; // Cambiar a false para deshabilitar el reset automático
+const char *serverUrl = DEV ? DEV_SERVER_URL : API_SERVER_URL;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -76,7 +70,6 @@ unsigned long lastPhotoChange = -60000;
 unsigned long secsPhotos = 30000; // 30 segundos por defecto
 unsigned long lastSpotifyCheck = 0;
 unsigned long timeToCheckSpotify = 5000; // 5 segundos
-String activationCode = "0000";
 
 // Variables para horario de encendido/apagado
 bool scheduleEnabled = false;
@@ -132,7 +125,6 @@ const unsigned long DRAWING_UPDATE_INTERVAL = 20; // Actualizar cada 20ms (50 FP
 #define WDT_TIMEOUT 30              // Watchdog timeout en segundos
 #define MQTT_MAX_RETRIES 5          // Máximo intentos de conexión MQTT
 #define MQTT_RETRY_DELAY 3000       // Delay entre reintentos MQTT (ms)
-#define ACTIVATION_TIMEOUT 300000   // Timeout activación: 5 minutos
 #define HTTP_TIMEOUT 10000          // Timeout para llamadas HTTP API (ms)
 #define HTTP_TIMEOUT_DOWNLOAD 30000 // Timeout para descargas (ms)
 
@@ -154,8 +146,6 @@ bool bleDeviceConnected = false;
 bool bleCredentialsReceived = false;
 String bleReceivedSSID = "";
 String bleReceivedPassword = "";
-
-// Cliente HTTP reutilizable para API (getPixie, registerPixie, OTA download)
 
 void wait(int ms)
 {
@@ -458,8 +448,7 @@ uint32_t mqttRequestId = 0;
 volatile uint32_t mqttResponseRequestId = 0;
 
 // Variables para registro via MQTT
-volatile int mqttRegisterPixieId = 0;
-String mqttRegisterCode = "";
+volatile int mqttRegisterFrameId = 0;
 
 // Forward declarations
 bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000);
@@ -467,21 +456,6 @@ void processPendingPhoto();
 void onReceiveNewPic(int id);
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 bool processBLECredentialsNonBlocking();
-
-// Cliente WiFi reutilizable para HTTP (getPixie, registerPixie, OTA download)
-static WiFiClientSecure *httpClient = nullptr;
-static HTTPClient http;
-
-void ensureHttpClient() {
-    // Solo crear cliente si no existe - evitar new/delete constantes
-    // Ver: https://github.com/espressif/arduino-esp32/issues/6561
-    if (httpClient == nullptr) {
-        httpClient = new WiFiClientSecure();
-        httpClient->setInsecure();
-    } else {
-        httpClient->stop();  // Cerrar conexión anterior si existe
-    }
-}
 
 // Forward declaration
 void showClockOverlay();
@@ -495,7 +469,7 @@ void fetchAndDrawCover()
     esp_task_wdt_reset();  // Reset watchdog antes de operación larga
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/cover";
+    String topic = String("frame/") + String(frameId) + "/request/cover";
     String payload = "{\"songId\":\"" + songShowing + "\"}";
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[Spotify] Error publicando request MQTT");
@@ -558,7 +532,7 @@ String fetchSongId()
     songIdBuffer[0] = '\0';  // Limpiar buffer
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/song";
+    String topic = String("frame/") + String(frameId) + "/request/song";
     if (!mqttClient.publish(topic.c_str(), "{}")) {
         LOG("[Spotify:fetchSongId] Error publicando request MQTT");
         return "";
@@ -634,7 +608,7 @@ void requestConfig()
     LOG("[Config] Solicitando configuración via MQTT...");
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/config";
+    String topic = String("frame/") + String(frameId) + "/request/config";
     if (!mqttClient.publish(topic.c_str(), "{}")) {
         LOG("[Config] Error publicando request MQTT");
         return;
@@ -942,7 +916,7 @@ void showPhoto(int index)
     mqttRequestId++;
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"index\":" + String(index) + ",\"reqId\":" + String(mqttRequestId) + "}";
 
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
@@ -979,7 +953,7 @@ void showPhotoById(int id)
     LOGF("[Photo] Solicitando foto id=%d via MQTT", id);
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"id\":" + String(id) + "}";
 
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
@@ -1076,7 +1050,7 @@ void showPhotoFromCenterById(int id)
     LOGF("[PhotoCenter] Solicitando foto id=%d via MQTT", id);
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/photo";
+    String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"id\":" + String(id) + "}";
 
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
@@ -1179,7 +1153,7 @@ void checkForUpdates()
     LOG("[OTA] Solicitando información de actualización via MQTT");
 
     // Publicar request via MQTT
-    String topic = String("pixie/") + String(pixieId) + "/request/ota";
+    String topic = String("frame/") + String(frameId) + "/request/ota";
     if (!mqttClient.publish(topic.c_str(), "{}")) {
         LOG("[OTA] Error publicando request MQTT");
         return;
@@ -1281,13 +1255,13 @@ void checkForUpdates()
 }
 
 // Registro via MQTT (reemplaza HTTP para evitar problemas SSL)
-bool registerPixieViaMQTT()
+bool registerFrameViaMQTT()
 {
     String macAddress = WiFi.macAddress();
-    LOGF("[MQTT:register] Registrando Pixie con MAC: %s", macAddress.c_str());
+    LOGF("[MQTT:register] Registrando frame con MAC: %s", macAddress.c_str());
 
     // Client ID temporal basado en MAC
-    String tempClientId = "pixie-mac-" + macAddress;
+    String tempClientId = "frame-mac-" + macAddress;
     tempClientId.replace(":", "");  // Quitar : del MAC para el client ID
 
     // Configurar MQTT
@@ -1304,7 +1278,7 @@ bool registerPixieViaMQTT()
     LOG("[MQTT:register] Conectado a MQTT");
 
     // Suscribirse al topic de respuesta
-    String responseTopic = "pixie/mac/" + macAddress + "/response/register";
+    String responseTopic = "frame/mac/" + macAddress + "/response/register";
     LOGF("[MQTT:register] Suscribiendo a: %s", responseTopic.c_str());
     if (!mqttClient.subscribe(responseTopic.c_str())) {
         LOG("[MQTT:register] Error suscribiendo");
@@ -1313,7 +1287,7 @@ bool registerPixieViaMQTT()
     }
 
     // Publicar request de registro
-    String requestTopic = "pixie/mac/" + macAddress + "/request/register";
+    String requestTopic = "frame/mac/" + macAddress + "/request/register";
     LOGF("[MQTT:register] Publicando en: %s", requestTopic.c_str());
     if (!mqttClient.publish(requestTopic.c_str(), "{}")) {
         LOG("[MQTT:register] Error publicando request");
@@ -1323,11 +1297,10 @@ bool registerPixieViaMQTT()
 
     // Esperar respuesta
     if (waitForMqttResponse("register", 10000)) {
-        if (mqttRegisterPixieId > 0) {
-            pixieId = mqttRegisterPixieId;
-            preferences.putInt("pixieId", pixieId);
-            preferences.putString("code", mqttRegisterCode);
-            LOGF("[MQTT:register] Pixie registrado: ID=%d, code=%s", pixieId, mqttRegisterCode.c_str());
+        if (mqttRegisterFrameId > 0) {
+            frameId = mqttRegisterFrameId;
+            preferences.putInt("frameId", frameId);
+            LOGF("[MQTT:register] Frame registrado: ID=%d", frameId);
 
             // Desconectar para reconectar luego con el client ID correcto
             mqttClient.disconnect();
@@ -1348,14 +1321,13 @@ void testInit()
     preferences.end();
     preferences.begin("wifi", false);
     preferences.putInt("currentVersion", 0);
-    preferences.putInt("pixieId", 0);
+    preferences.putInt("frameId", 0);
     preferences.putInt("brightness", 50);
     preferences.putInt("maxPhotos", 5);
     preferences.putUInt("secsPhotos", 30000);
     preferences.putString("ssid", "");
     preferences.putString("password", "");
     preferences.putBool("allowSpotify", false);
-    preferences.putString("code", "0000"); // Inicializar el código de activación vacío
     LOG("Preferencias reiniciadas a valores de fábrica");
 }
 
@@ -1533,11 +1505,6 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putUInt("secsPhotos", secsPhotos);
                 LOGF("[MQTT] Config secs between photos: %d", secsBetweenPhotos);
             }
-            if (doc.containsKey("code")) {
-                activationCode = doc["code"].as<String>();
-                preferences.putString("code", activationCode);
-                LOGF("[MQTT] Config code: %s", activationCode.c_str());
-            }
             if (doc.containsKey("schedule_enabled")) {
                 scheduleEnabled = doc["schedule_enabled"];
                 preferences.putBool("scheduleEnabled", scheduleEnabled);
@@ -1588,8 +1555,7 @@ void handleConfigResponse(byte* payload, unsigned int length) {
 
 // Handler para respuesta de registro via MQTT
 void handleRegisterResponse(byte* payload, unsigned int length) {
-    mqttRegisterPixieId = 0;
-    mqttRegisterCode = "";
+    mqttRegisterFrameId = 0;
 
     if (length > 0 && length < sizeof(httpBuffer)) {
         memcpy(httpBuffer, payload, length);
@@ -1597,14 +1563,13 @@ void handleRegisterResponse(byte* payload, unsigned int length) {
 
         LOGF("[MQTT:register] Respuesta recibida: %s", httpBuffer);
 
-        // Parsear {"pixieId": N, "code": "XXXX"}
+        // TODO: Backend still sends "pixieId" - update to "frameId" when backend is migrated
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, httpBuffer);
         if (!error) {
-            mqttRegisterPixieId = doc["pixieId"] | 0;
-            mqttRegisterCode = doc["code"].as<String>();
-            LOGF("[MQTT:register] pixieId=%d, code=%s", mqttRegisterPixieId, mqttRegisterCode.c_str());
-            mqttResponseSuccess = (mqttRegisterPixieId > 0);
+            mqttRegisterFrameId = doc["pixieId"] | 0;
+            LOGF("[MQTT:register] frameId=%d", mqttRegisterFrameId);
+            mqttResponseSuccess = (mqttRegisterFrameId > 0);
         } else {
             LOG("[MQTT:register] Error parseando JSON");
             mqttResponseSuccess = false;
@@ -1697,11 +1662,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     preferences.putUInt("secsPhotos", secsPhotos);
                     LOGF("[MQTT] Secs between photos: %d", secsBetweenPhotos);
                 }
-                if (doc.containsKey("code")) {
-                    activationCode = doc["code"].as<String>();
-                    preferences.putString("code", activationCode);
-                    LOGF("[MQTT] Code: %s", activationCode.c_str());
-                }
                 if (doc.containsKey("schedule_enabled")) {
                     scheduleEnabled = doc["schedule_enabled"];
                     preferences.putBool("scheduleEnabled", scheduleEnabled);
@@ -1771,24 +1731,22 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 // Reinicializar con valores por defecto
                 preferences.begin("wifi", false);
                 preferences.putInt("currentVersion", 0);
-                preferences.putInt("pixieId", 0);
+                preferences.putInt("frameId", 0);
                 preferences.putInt("brightness", 50);
                 preferences.putInt("maxPhotos", 5);
                 preferences.putUInt("secsPhotos", 30000);
                 preferences.putString("ssid", "");
                 preferences.putString("password", "");
                 preferences.putBool("allowSpotify", false);
-                preferences.putString("code", "0000");
                 preferences.end();
-                
+
                 // Resetear variables globales
                 brightness = 50;
                 maxPhotos = 5;
                 secsPhotos = 30000;
                 allowSpotify = false;
-                activationCode = "0000";
                 currentVersion = 0;
-                pixieId = 0;
+                frameId = 0;
                 scheduleEnabled = false;
                 scheduleOnHour = 8;
                 scheduleOnMinute = 0;
@@ -1877,14 +1835,14 @@ void mqttReconnect()
         LOGF("[MQTT:mqttReconnect] Intentando conexión (intento %d/%d) a %s:%d...",
                       retryCount + 1, MQTT_MAX_RETRIES, MQTT_BROKER_URL, MQTT_BROKER_PORT);
 
-        String clientId = String(MQTT_CLIENT_ID) + String(pixieId);
+        String clientId = String(MQTT_CLIENT_ID) + String(frameId);
 
         if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
         {
             LOG("[MQTT:mqttReconnect] Conectado exitosamente");
 
             // Suscribirse al topic principal de comandos
-            String topic = String("pixie/") + String(pixieId);
+            String topic = String("frame/") + String(frameId);
             LOGF("[MQTT:mqttReconnect] Suscribiendo al tema: %s", topic.c_str());
             if (mqttClient.subscribe(topic.c_str())) {
                 LOG("[MQTT:mqttReconnect] Suscripción exitosa");
@@ -1893,7 +1851,7 @@ void mqttReconnect()
             }
 
             // Suscribirse a topics de respuesta (para patrón request/response)
-            String responseTopic = String("pixie/") + String(pixieId) + "/response/#";
+            String responseTopic = String("frame/") + String(frameId) + "/response/#";
             LOGF("[MQTT:mqttReconnect] Suscribiendo a respuestas: %s", responseTopic.c_str());
             if (mqttClient.subscribe(responseTopic.c_str())) {
                 LOG("[MQTT:mqttReconnect] Suscripción a respuestas exitosa");
@@ -1956,63 +1914,8 @@ void drawLogo()
 
 // ===== FUNCIONES BLE PARA PROVISIONING =====
 
-// Función auxiliar para decodificar Base64
-String base64Decode(String input) {
-    // Tabla de decodificación Base64
-    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    String output = "";
-    int val = 0, valb = -8;
-
-    for (unsigned int i = 0; i < input.length(); i++) {
-        char c = input[i];
-        if (c == '=') break;
-
-        const char* p = strchr(base64_chars, c);
-        if (p == nullptr) continue;
-
-        val = (val << 6) + (p - base64_chars);
-        valb += 6;
-
-        if (valb >= 0) {
-            output += char((val >> valb) & 0xFF);
-            valb -= 8;
-        }
-    }
-
-    return output;
-}
-
-// Función auxiliar para codificar Base64
-String base64Encode(String input) {
-    static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    String output = "";
-    int val = 0, valb = -6;
-
-    for (unsigned int i = 0; i < input.length(); i++) {
-        val = (val << 8) + (unsigned char)input[i];
-        valb += 8;
-
-        while (valb >= 0) {
-            output += base64_chars[(val >> valb) & 0x3F];
-            valb -= 6;
-        }
-    }
-
-    if (valb > -6) {
-        output += base64_chars[((val << 8) >> (valb + 8)) & 0x3F];
-    }
-
-    while (output.length() % 4) {
-        output += '=';
-    }
-
-    return output;
-}
-
 // Callback para conexiones del servidor BLE
-class PixieBLEServerCallbacks : public NimBLEServerCallbacks {
+class FrameBLEServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer) {
         bleDeviceConnected = true;
         LOG("[BLE] Cliente conectado");
@@ -2100,7 +2003,7 @@ void setupBLE() {
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
     pBLEServer = NimBLEDevice::createServer();
-    pBLEServer->setCallbacks(new PixieBLEServerCallbacks());
+    pBLEServer->setCallbacks(new FrameBLEServerCallbacks());
 
     // Crear servicio con el UUID que espera la app
     NimBLEService* pService = pBLEServer->createService(SERVICE_UUID);
@@ -2245,140 +2148,10 @@ bool processBLECredentialsNonBlocking() {
 
 // ===== FIN FUNCIONES BLE =====
 
-void showActivationCode(String code) {
-    dma_display->clearScreen();
-    dma_display->setTextSize(1);
-    dma_display->setTextColor(myWHITE);
-    dma_display->setFont(&Picopixel);
-    
-    // Mostrar "Activation code:" centrado
-    int16_t x1, y1;
-    uint16_t w, h;
-    const char* label = "Activation code:";
-    dma_display->getTextBounds(label, 0, 0, &x1, &y1, &w, &h);
-    int16_t labelX = (PANEL_RES_X - w) / 2;
-    dma_display->setCursor(labelX, 20);
-    dma_display->print(label);
-    
-    // Mostrar el código con fuente más pequeña
-    dma_display->setFont();  // Usar fuente por defecto (más pequeña)
-    dma_display->setTextSize(2);  // Tamaño 2 para que sea visible pero no muy grande
-    
-    // Obtener el ancho del código con tamaño 2
-    dma_display->getTextBounds(code, 0, 0, &x1, &y1, &w, &h);
-    
-    // Si el código es muy ancho, reducir el tamaño
-    if (w > PANEL_RES_X - 4) {  // Dejar 2 píxeles de margen a cada lado
-        dma_display->setTextSize(1);
-        dma_display->getTextBounds(code, 0, 0, &x1, &y1, &w, &h);
-    }
-    
-    // Calcular posición X centrada
-    int16_t codeX = (PANEL_RES_X - w) / 2;
-    
-    // Asegurar que nunca sea negativo (por si acaso)
-    if (codeX < 0) codeX = 0;
-    
-    // Posición Y para el código
-    int16_t codeY = 40;
-    
-    dma_display->setCursor(codeX, codeY);
-    dma_display->print(code);
-    
-    // Restaurar configuración de fuente
-    dma_display->setFont(&Picopixel);
-    dma_display->setTextSize(1);
-}
-
-void checkActivation() {
-    String currentCode = preferences.getString("code", "0000");
-    LOGF("Código de activación: %s", currentCode.c_str());
-
-    if (currentCode != "0000")
-    {
-        showActivationCode(currentCode);
-
-        unsigned long startTime = millis();
-        int attempts = 0;
-
-        while (currentCode != "0000" && millis() - startTime < ACTIVATION_TIMEOUT)
-        {
-            esp_task_wdt_reset();  // Reset watchdog durante espera larga
-            requestConfig();  // Solicitar config via MQTT para obtener código de activación
-            currentCode = preferences.getString("code", "0000");
-            attempts++;
-
-            if (attempts % 10 == 0) {
-                LOGF("Esperando activación... (%lu segundos)",
-                              (millis() - startTime) / 1000);
-            }
-            delay(2000);
-        }
-
-        dma_display->clearScreen();
-        if (currentCode == "0000")
-        {
-            showLoadingMsg("Activated!");
-            LOG("Dispositivo activado correctamente");
-            delay(2000);
-        }
-        else
-        {
-            showLoadingMsg("Timeout");
-            LOG("Timeout de activación - reiniciando ESP32...");
-            delay(2000);
-            ESP.restart();
-        }
-    }
-}
-
-// Función para resetear las variables de entorno al inicio
-void resetEnvironmentVariables() {
-    if (AUTO_RESET_ON_STARTUP) {
-        LOG("==========================================");
-        LOG("        RESETEO AUTOMÁTICO ACTIVADO      ");
-        LOG("==========================================");
-        LOG("Reseteando variables de entorno...");
-        
-        // Limpiar todas las preferencias guardadas
-        preferences.begin("wifi", false);
-        preferences.clear();
-        preferences.end();
-        
-        // Reinicializar con valores por defecto
-        preferences.begin("wifi", false);
-        preferences.putInt("currentVersion", 0);
-        preferences.putInt("pixieId", 0);
-        preferences.putInt("brightness", 50);
-        preferences.putInt("maxPhotos", 5);
-        preferences.putUInt("secsPhotos", 30000);
-        preferences.putString("ssid", "");
-        preferences.putString("password", "");
-        preferences.putBool("allowSpotify", false);
-        preferences.putString("code", "0000");
-        preferences.end();
-        
-        // Resetear variables globales
-        brightness = 50;
-        maxPhotos = 5;
-        secsPhotos = 30000;
-        allowSpotify = false;
-        activationCode = "0000";
-        currentVersion = 0;
-        pixieId = 0;
-        
-        LOG("Variables de entorno reseteadas exitosamente!");
-        LOG("==========================================");
-    }
-}
-
 void setup()
 {
     Serial.begin(115200);
-    
-    // Resetear variables de entorno al inicio si está habilitado
-    resetEnvironmentVariables();
-    
+
     // Mostrar información del modo de desarrollo
     if (DEV) {
         LOG("==========================================");
@@ -2417,9 +2190,16 @@ void setup()
     allowSpotify = preferences.getBool("allowSpotify", true);
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
-    pixieId = preferences.getInt("pixieId", 0);
+    frameId = preferences.getInt("frameId", 0);
+    if (frameId == 0) {
+        // Backward compatibility: read old NVS key
+        frameId = preferences.getInt("pixieId", 0);
+        if (frameId > 0) {
+            preferences.putInt("frameId", frameId);
+            preferences.remove("pixieId");
+        }
+    }
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
-    activationCode = preferences.getString("code", "0000");
     // Cargar configuración de horario
     scheduleEnabled = preferences.getBool("scheduleEnabled", false);
     scheduleOnHour = preferences.getInt("scheduleOnHour", 8);
@@ -2534,7 +2314,7 @@ void setup()
     mqttClient.setBufferSize(16384); // Buffer grande para fotos (12KB) y covers (8KB) via MQTT
 
     // Configuración de OTA
-    ArduinoOTA.setHostname(("Pixie-" + String(pixieId)).c_str());
+    ArduinoOTA.setHostname(("Frame-" + String(frameId)).c_str());
     ArduinoOTA.onStart([]() {
         String type;
         if (ArduinoOTA.getCommand() == U_FLASH)
@@ -2582,13 +2362,13 @@ void setup()
         LOG("Modo DEV activo - saltando comprobación inicial de actualizaciones");
     }
 
-    // Register Pixie if not registered (via MQTT)
-    if (pixieId == 0) {
+    // Register frame if not registered (via MQTT)
+    if (frameId == 0) {
         showLoadingMsg("Registering...");
-        if (!registerPixieViaMQTT()) {
-            LOG("Error registrando pixie via MQTT, reintentando...");
+        if (!registerFrameViaMQTT()) {
+            LOG("Error registrando frame via MQTT, reintentando...");
             delay(2000);
-            registerPixieViaMQTT();  // Un reintento
+            registerFrameViaMQTT();  // Un reintento
         }
     }
 
@@ -2610,9 +2390,6 @@ void setup()
         startupBrightnessRampDone = true;
         LOGF("[Startup] Brillo objetivo alcanzado: %d", targetBrightness);
     }
-
-    // Verificar estado de activación
-    checkActivation();
 
     // Inicializar Watchdog Timer
     esp_task_wdt_init(WDT_TIMEOUT, true);

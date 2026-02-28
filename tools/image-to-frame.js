@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Convierte una imagen a formato binario compatible con Pixie ESP32
+ * Convierte una imagen a formato binario compatible con frame. ESP32
  *
  * Formatos de salida:
  *
@@ -16,7 +16,7 @@
  *    - Constantes con dimensiones
  *
  * Uso:
- *   node image-to-pixie.js <imagen> [opciones]
+ *   node image-to-frame.js <imagen> [opciones]
  *
  * Opciones:
  *   -o, --output <archivo>   Archivo de salida (default: <nombre>.bin)
@@ -32,7 +32,7 @@ const path = require('path');
 
 function generateHeaderFile(varName, rgbBuffer, title, username) {
     const lines = [];
-    lines.push(`// Generado automáticamente por image-to-pixie.js`);
+    lines.push(`// Generado automáticamente por image-to-frame.js`);
     lines.push(`// Imagen: 64x64 RGB`);
     lines.push(`#pragma once`);
     lines.push(``);
@@ -86,7 +86,7 @@ function generateHeaderFile(varName, rgbBuffer, title, username) {
     return lines.join('\n');
 }
 
-async function convertImageToPixie(inputPath, options = {}) {
+async function convertImageToFrame(inputPath, options = {}) {
     const {
         output,
         title = '',
@@ -211,10 +211,10 @@ function parseArgs(args) {
 
 function showHelp() {
     console.log(`
-Convierte una imagen a formato compatible con Pixie ESP32
+Convierte una imagen a formato compatible con frame. ESP32
 
 Uso:
-  node image-to-pixie.js <imagen> [opciones]
+  node image-to-frame.js <imagen> [opciones]
 
 Opciones:
   -o, --output <archivo>   Archivo de salida (default: <nombre>.bin o .h)
@@ -226,12 +226,12 @@ Opciones:
 
 Ejemplos:
   # Generar archivo binario para servir via HTTP
-  node image-to-pixie.js foto.jpg
-  node image-to-pixie.js foto.png -o mi_foto.bin -t "Mi foto" -u "Alvaro"
+  node image-to-frame.js foto.jpg
+  node image-to-frame.js foto.png -o mi_foto.bin -t "Mi foto" -u "Alvaro"
 
   # Generar header C para embeber en firmware
-  node image-to-pixie.js logo.png --header
-  node image-to-pixie.js icono.jpg -H -o include/icono.h
+  node image-to-frame.js logo.png --header
+  node image-to-frame.js icono.jpg -H -o include/icono.h
 `);
 }
 
@@ -252,7 +252,7 @@ if (require.main === module) {
         process.exit(1);
     }
 
-    convertImageToPixie(inputPath, options);
+    convertImageToFrame(inputPath, options);
 }
 
-module.exports = { convertImageToPixie };
+module.exports = { convertImageToFrame };
