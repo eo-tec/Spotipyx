@@ -6,7 +6,7 @@ import { WebSocketServer } from 'ws';
 import net from 'net';
 
 const WS_PORT = 9001;
-const MQTT_HOST = 'mqtt.mypixelframe.com';
+const MQTT_HOST = 'mqtt.frame64.fun';
 const MQTT_PORT = 1883;
 
 const wss = new WebSocketServer({
