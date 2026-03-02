@@ -211,13 +211,6 @@ void setup()
     timeClient.setTimeOffset(0);
     timeClient.update();
 
-    // Check for updates on startup
-    #ifndef DEV_MODE
-    checkForUpdates();
-    #else
-    LOG("DEV_MODE active - skipping startup update check");
-    #endif
-
     // OTA migration: if device has frameId but no mqttToken, re-register to get credentials
     if (frameId > 0 && mqttToken.length() == 0) {
         LOGF("[Migration] Frame %d has no MQTT token - re-registering to obtain credentials", frameId);
@@ -240,6 +233,13 @@ void setup()
 
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
+
+    // Check for updates on startup (after MQTT is connected)
+    #ifndef DEV_MODE
+    checkForUpdates();
+    #else
+    LOG("DEV_MODE active - skipping startup update check");
+    #endif
 
     // Rampa gradual de brillo para evitar brownout por pico de corriente
     {

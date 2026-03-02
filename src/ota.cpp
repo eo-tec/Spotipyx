@@ -55,70 +55,85 @@ void checkForUpdates()
 
     if (latestVersion > currentVersion)
     {
-        LOGF("New version available: %d", latestVersion);
+        LOGF("[OTA] New version available: %d (current: %d)", latestVersion, currentVersion);
         showUpdateMessage();
-        LOG("Downloading update...");
+
+        LOGF("[OTA] Download URL: %s", updateUrl.c_str());
+        LOGF("[OTA] URL starts with https: %s", updateUrl.startsWith("https://") ? "yes" : "no");
+        LOGF("[OTA] Free heap before download: %d bytes", ESP.getFreeHeap());
 
         // La descarga del firmware sigue usando HTTP (necesario para streaming)
         WiFiClient *updateClient;
         if (updateUrl.startsWith("https://")) {
+            LOG("[OTA] Creating WiFiClientSecure (insecure mode)...");
             WiFiClientSecure *secureClient = new WiFiClientSecure();
             secureClient->setInsecure();
             updateClient = secureClient;
         } else {
+            LOG("[OTA] Creating plain WiFiClient...");
             updateClient = new WiFiClient();
         }
 
         HTTPClient updateHttp;
+        LOG("[OTA] Calling HTTPClient.begin()...");
         updateHttp.begin(*updateClient, updateUrl);
         updateHttp.setTimeout(30000);
+        LOG("[OTA] Calling HTTP GET...");
         int updateHttpCode = updateHttp.GET();
+        LOGF("[OTA] HTTP response code: %d", updateHttpCode);
 
         if (updateHttpCode == 200)
         {
             WiFiClient *updateStream = updateHttp.getStreamPtr();
             size_t contentLength = updateHttp.getSize();
+            LOGF("[OTA] Content-Length: %d bytes", contentLength);
+            LOGF("[OTA] Free heap after GET: %d bytes", ESP.getFreeHeap());
+
             Update.onProgress([](size_t written, size_t total)
                               {
                 int percent = (written * 100) / total;
                 showPercetage(percent);
-                LOGF("Progreso: %d%% (%d/%d bytes)", percent, written, total); });
+                LOGF("[OTA] Progress: %d%% (%d/%d bytes)", percent, written, total); });
 
+            LOG("[OTA] Calling Update.begin()...");
             if (Update.begin(contentLength))
             {
+                LOG("[OTA] Update.begin() OK, writing stream...");
                 size_t written = Update.writeStream(*updateStream);
+                LOGF("[OTA] writeStream returned: %d bytes (expected %d)", written, contentLength);
                 if (written == contentLength)
                 {
-                    LOG("[OTA] Firmware escrito correctamente");
+                    LOG("[OTA] Firmware written OK, calling Update.end()...");
                     if (Update.end())
                     {
-                        LOG("[OTA] Actualización completada exitosamente");
+                        LOG("[OTA] Update completed successfully, restarting...");
                         preferences.putInt("currentVersion", latestVersion);
                         ESP.restart();
                     }
                     else
                     {
-                        LOGF("[OTA] Error al finalizar Update: %s", Update.errorString());
+                        LOGF("[OTA] Update.end() FAILED: %s", Update.errorString());
                     }
                 }
                 else
                 {
-                    LOGF("[OTA] Error de escritura: solo %d/%d bytes escritos", written, contentLength);
+                    LOGF("[OTA] Write error: only %d/%d bytes written", written, contentLength);
+                    LOGF("[OTA] Update error: %s", Update.errorString());
                 }
             }
             else
             {
-                LOG("[OTA] Error: espacio insuficiente para actualización");
+                LOGF("[OTA] Update.begin() FAILED (contentLength=%d): %s", contentLength, Update.errorString());
             }
         }
         else
         {
-            LOGF("[OTA] Error HTTP al descargar firmware: %d", updateHttpCode);
-            if (updateHttpCode == 404) {
-                LOG("[OTA] Archivo no encontrado o URL expirada");
+            LOGF("[OTA] HTTP error downloading firmware: %d", updateHttpCode);
+            if (updateHttpCode < 0) {
+                LOGF("[OTA] Connection error (negative code means HTTPClient error, not HTTP status)");
             }
             String response = updateHttp.getString();
-            LOGF("[OTA] Respuesta del servidor: %s", response.c_str());
+            LOGF("[OTA] Server response: %s", response.substring(0, 200).c_str());
         }
         updateHttp.end();
         delete updateClient;
