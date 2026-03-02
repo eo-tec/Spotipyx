@@ -2,7 +2,7 @@
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClientSecure.h>  // Used for OTA HTTPS downloads
 #include <ArduinoJson.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -58,6 +58,7 @@ int maxPhotos = 5;
 int currentVersion = 0;
 int frameId = 0;
 int photoIndex = 0;
+String mqttToken = "";  // Per-device MQTT credential (stored in NVS)
 
 const bool DEV = false;
 const char *serverUrl = DEV ? DEV_SERVER_URL : API_SERVER_URL;
@@ -1269,9 +1270,10 @@ bool registerFrameViaMQTT()
     mqttClient.setCallback(mqttCallback);
     mqttClient.setKeepAlive(60);
 
-    // Conectar con client ID temporal
+    // Conectar con client ID temporal usando register credentials
     LOGF("[MQTT:register] Conectando con client ID: %s", tempClientId.c_str());
-    if (!mqttClient.connect(tempClientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD)) {
+    LOGF("[MQTT:register] Free heap: %d bytes, largest block: %d bytes", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    if (!mqttClient.connect(tempClientId.c_str(), MQTT_REGISTER_USERNAME, MQTT_REGISTER_PASSWORD)) {
         LOGF("[MQTT:register] Error conectando: %d", mqttClient.state());
         return false;
     }
@@ -1563,12 +1565,20 @@ void handleRegisterResponse(byte* payload, unsigned int length) {
 
         LOGF("[MQTT:register] Respuesta recibida: %s", httpBuffer);
 
-        // TODO: Backend still sends "pixieId" - update to "frameId" when backend is migrated
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, httpBuffer);
         if (!error) {
-            mqttRegisterFrameId = doc["pixieId"] | 0;
+            mqttRegisterFrameId = doc["frameId"] | doc["pixieId"] | 0;
             LOGF("[MQTT:register] frameId=%d", mqttRegisterFrameId);
+
+            // Store per-device MQTT token if provided
+            const char* token = doc["deviceToken"] | (const char*)nullptr;
+            if (token && strlen(token) > 0) {
+                mqttToken = String(token);
+                preferences.putString("mqttToken", mqttToken);
+                LOGF("[MQTT:register] Device token stored (%d chars)", mqttToken.length());
+            }
+
             mqttResponseSuccess = (mqttRegisterFrameId > 0);
         } else {
             LOG("[MQTT:register] Error parseando JSON");
@@ -1738,6 +1748,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 preferences.putString("ssid", "");
                 preferences.putString("password", "");
                 preferences.putBool("allowSpotify", false);
+                preferences.putString("mqttToken", "");
                 preferences.end();
 
                 // Resetear variables globales
@@ -1747,6 +1758,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 allowSpotify = false;
                 currentVersion = 0;
                 frameId = 0;
+                mqttToken = "";
                 scheduleEnabled = false;
                 scheduleOnHour = 8;
                 scheduleOnMinute = 0;
@@ -1837,7 +1849,34 @@ void mqttReconnect()
 
         String clientId = String(MQTT_CLIENT_ID) + String(frameId);
 
-        if (mqttClient.connect(clientId.c_str(), MQTT_BROKER_USERNAME, MQTT_BROKER_PASSWORD))
+        // Use per-device token if available, otherwise fallback to register credentials
+        const char* mqttUser;
+        const char* mqttPass;
+        if (mqttToken.length() > 0) {
+            String macClean = WiFi.macAddress();
+            macClean.replace(":", "");
+            // Use static buffers to avoid dangling pointers
+            static char userBuf[32];
+            static char passBuf[64];
+            strncpy(userBuf, macClean.c_str(), sizeof(userBuf) - 1);
+            userBuf[sizeof(userBuf) - 1] = '\0';
+            strncpy(passBuf, mqttToken.c_str(), sizeof(passBuf) - 1);
+            passBuf[sizeof(passBuf) - 1] = '\0';
+            mqttUser = userBuf;
+            mqttPass = passBuf;
+            LOGF("[MQTT:mqttReconnect] Using device credentials (user=%s)", mqttUser);
+        } else {
+            // Sin token: conectar anónimo (allow_anonymous=true en broker)
+            // Las credenciales de register solo tienen ACL para topics de registro
+            mqttUser = nullptr;
+            mqttPass = nullptr;
+            LOG("[MQTT:mqttReconnect] Connecting anonymous (no device token yet)");
+        }
+
+        bool connected = mqttUser
+            ? mqttClient.connect(clientId.c_str(), mqttUser, mqttPass)
+            : mqttClient.connect(clientId.c_str());
+        if (connected)
         {
             LOG("[MQTT:mqttReconnect] Conectado exitosamente");
 
@@ -2208,6 +2247,7 @@ void setup()
     scheduleOffMinute = preferences.getInt("scheduleOffMinute", 0);
     timezoneOffset = preferences.getInt("timezoneOffset", 0);
     clockEnabled = preferences.getBool("clockEnabled", false);
+    mqttToken = preferences.getString("mqttToken", "");
 
     // Si no hay credenciales guardadas, iniciar modo BLE para provisioning
     if (storedSSID == "") {
@@ -2307,11 +2347,13 @@ void setup()
         }
     }
 
-    // Configuración de MQTT (sin TLS para puerto 1883)
+    // Configuración de MQTT (puerto 1883, auth por dispositivo)
+    // TLS no es viable con el panel DMA activo (heap insuficiente para handshake RSA)
+    // La seguridad se basa en credenciales MQTT únicas por dispositivo
     mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
     mqttClient.setCallback(mqttCallback);
-    mqttClient.setKeepAlive(60);  // Keep-alive de 60 segundos
-    mqttClient.setBufferSize(16384); // Buffer grande para fotos (12KB) y covers (8KB) via MQTT
+    mqttClient.setKeepAlive(60);
+    mqttClient.setBufferSize(16384);
 
     // Configuración de OTA
     ArduinoOTA.setHostname(("Frame-" + String(frameId)).c_str());
@@ -2360,6 +2402,12 @@ void setup()
         checkForUpdates();
     } else {
         LOG("Modo DEV activo - saltando comprobación inicial de actualizaciones");
+    }
+
+    // OTA migration: if device has frameId but no mqttToken, re-register to get credentials
+    if (frameId > 0 && mqttToken.length() == 0) {
+        LOGF("[Migration] Frame %d has no MQTT token - re-registering to obtain credentials", frameId);
+        frameId = 0;  // Force re-registration
     }
 
     // Register frame if not registered (via MQTT)
