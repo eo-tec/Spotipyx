@@ -32,7 +32,7 @@ export default function App() {
   }, []);
 
   const handleConnect = useCallback(
-    async (pixieId: number, brokerUrl: string) => {
+    async (pixieId: number, brokerUrl: string, username: string, password: string) => {
       if (!displayRef.current) return;
       setConnecting(true);
 
@@ -45,7 +45,7 @@ export default function App() {
           if (!status) addLog('Disconnected from MQTT');
         });
 
-        await mqtt.connect(brokerUrl, 'server', 'Test1234!', pixieId);
+        await mqtt.connect(brokerUrl, username, password, pixieId);
         addLog(`Connected to ${brokerUrl} as pixie-${pixieId}`);
 
         const mainLoop = new MainLoop(displayRef.current, mqtt);

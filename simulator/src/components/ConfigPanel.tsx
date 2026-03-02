@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 interface ConfigPanelProps {
-  onConnect: (pixieId: number, brokerUrl: string) => void;
+  onConnect: (pixieId: number, brokerUrl: string, username: string, password: string) => void;
   onDisconnect: () => void;
   connected: boolean;
   connecting: boolean;
@@ -17,13 +17,13 @@ export default function ConfigPanel({
     return localStorage.getItem('sim_pixieId') || '12';
   });
   const [brokerUrl, setBrokerUrl] = useState(() => {
-    const saved = localStorage.getItem('sim_brokerUrl');
-    // Migrate old default that pointed to non-existent remote WS port
-    if (saved && saved.includes('mypixelframe.com:9001')) {
-      localStorage.removeItem('sim_brokerUrl');
-      return 'ws://localhost:9001';
-    }
-    return saved || 'ws://localhost:9001';
+    return localStorage.getItem('sim_brokerUrl') || 'ws://localhost:9001';
+  });
+  const [username, setUsername] = useState(() => {
+    return localStorage.getItem('sim_username') || 'server';
+  });
+  const [password, setPassword] = useState(() => {
+    return localStorage.getItem('sim_password') || '';
   });
 
   const handleConnect = () => {
@@ -31,7 +31,9 @@ export default function ConfigPanel({
     if (isNaN(id) || id <= 0) return;
     localStorage.setItem('sim_pixieId', pixieId);
     localStorage.setItem('sim_brokerUrl', brokerUrl);
-    onConnect(id, brokerUrl);
+    localStorage.setItem('sim_username', username);
+    localStorage.setItem('sim_password', password);
+    onConnect(id, brokerUrl, username, password);
   };
 
   return (
@@ -54,6 +56,26 @@ export default function ConfigPanel({
           value={brokerUrl}
           onChange={(e) => setBrokerUrl(e.target.value)}
           placeholder="ws://..."
+          disabled={connected || connecting}
+        />
+      </div>
+      <div className="field">
+        <label>Username</label>
+        <input
+          type="text"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="MQTT username"
+          disabled={connected || connecting}
+        />
+      </div>
+      <div className="field">
+        <label>Password</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="MQTT password"
           disabled={connected || connecting}
         />
       </div>

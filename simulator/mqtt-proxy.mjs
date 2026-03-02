@@ -5,9 +5,9 @@
 import { WebSocketServer } from 'ws';
 import net from 'net';
 
-const WS_PORT = 9001;
-const MQTT_HOST = 'mqtt.frame64.fun';
-const MQTT_PORT = 1883;
+const WS_PORT = process.env.WS_PORT || 9001;
+const MQTT_HOST = process.env.MQTT_HOST || 'localhost';
+const MQTT_PORT = process.env.MQTT_PORT || 1883;
 
 const wss = new WebSocketServer({
   port: WS_PORT,
