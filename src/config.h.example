@@ -1,14 +1,12 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// MQTT Broker
-#define MQTT_BROKER_URL      "your-mqtt-broker.com"
-#define MQTT_BROKER_PORT     1883
-#define MQTT_BROKER_USERNAME "your-username"
-#define MQTT_BROKER_PASSWORD "your-password"
-
-// API Server
-#define API_SERVER_URL       "https://your-api-server.com/"
-#define DEV_SERVER_URL       "http://192.168.1.100:3000/"
+// MQTT Broker — your broker address and registration credentials
+// For self-hosted: use your own Mosquitto broker
+// For frame64.fun service: register at https://frame64.fun to get credentials
+#define MQTT_BROKER_URL        "your-mqtt-broker.com"
+#define MQTT_BROKER_PORT       1883
+#define MQTT_REGISTER_USERNAME "register"
+#define MQTT_REGISTER_PASSWORD "your-register-password"
 
 #endif

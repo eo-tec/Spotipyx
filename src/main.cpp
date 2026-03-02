@@ -60,9 +60,6 @@ int frameId = 0;
 int photoIndex = 0;
 String mqttToken = "";  // Per-device MQTT credential (stored in NVS)
 
-const bool DEV = false;
-const char *serverUrl = DEV ? DEV_SERVER_URL : API_SERVER_URL;
-
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
@@ -198,9 +195,7 @@ void enterDrawingMode() {
     drawingMode = true;
     lastDrawingActivity = millis();
     
-    if (!DEV) {
-        LOG("Entering drawing mode");
-    }
+    LOG("Entering drawing mode");
     
     // Inicializar buffer de dibujo con canvas negro
     for (int y = 0; y < PANEL_RES_Y; y++) {
@@ -217,9 +212,7 @@ void enterDrawingMode() {
 void exitDrawingMode() {
     drawingMode = false;
     
-    if (!DEV) {
-        LOG("Exiting drawing mode");
-    }
+    LOG("Exiting drawing mode");
     
     // Volver al modo normal (mostrar fotos)
     dma_display->clearScreen();
@@ -290,9 +283,7 @@ void clearDrawingCanvas() {
 // Función para verificar timeout del modo dibujo
 void checkDrawingTimeout() {
     if (drawingMode && (millis() - lastDrawingActivity > DRAWING_TIMEOUT)) {
-        if (!DEV) {
-            LOG("Drawing mode timeout - returning to photo mode");
-        }
+        LOG("Drawing mode timeout - returning to photo mode");
         exitDrawingMode();
     }
 }
@@ -1133,11 +1124,10 @@ void showCheckMessage()
 
 void checkForUpdates()
 {
-    // En modo DEV, no comprobar actualizaciones
-    if (DEV) {
-        LOG("Modo DEV activo - saltando comprobación de actualizaciones");
-        return;
-    }
+    #ifdef DEV_MODE
+    LOG("DEV_MODE active - skipping update check");
+    return;
+    #endif
 
     // Asegurar que el tiempo esté sincronizado antes de la actualización
     timeClient.update();
@@ -1710,12 +1700,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             }
             else if (strcmp(action, "update_bin") == 0)
             {
-                if (DEV) {
-                    LOG("Comando de actualización recibido por MQTT - ignorado en modo DEV");
-                } else {
-                    LOG("Se recibio una actualizacion de binario por MQTT");
-                    checkForUpdates();
-                }
+                #ifdef DEV_MODE
+                LOG("Update command received via MQTT - ignored in DEV_MODE");
+                #else
+                LOG("Se recibio una actualizacion de binario por MQTT");
+                checkForUpdates();
+                #endif
             }
             else if (strcmp(action, "factory_reset") == 0)
             {
@@ -2191,24 +2181,16 @@ void setup()
 {
     Serial.begin(115200);
 
-    // Mostrar información del modo de desarrollo
-    if (DEV) {
-        LOG("==========================================");
-        LOG("           MODO DESARROLLO ACTIVO        ");
-        LOG("==========================================");
-        LOGF("- Servidor: %s", serverUrl);
-        LOG("- Actualizaciones OTA: DESHABILITADAS");
-        LOG("- Seguridad TLS: DESHABILITADA");
-        LOG("==========================================");
-    } else {
-        LOG("==========================================");
-        LOG("           MODO PRODUCCIÓN ACTIVO        ");
-        LOG("==========================================");
-        LOGF("- Servidor: %s", serverUrl);
-        LOG("- Actualizaciones OTA: HABILITADAS");
-        LOG("- Seguridad TLS: HABILITADA");
-        LOG("==========================================");
-    }
+    LOG("==========================================");
+    #ifdef DEV_MODE
+    LOG("           DEV_MODE BUILD               ");
+    LOG("- OTA updates: DISABLED");
+    #else
+    LOG("           RELEASE BUILD                ");
+    LOG("- OTA updates: ENABLED");
+    #endif
+    LOGF("- MQTT broker: %s:%d", MQTT_BROKER_URL, MQTT_BROKER_PORT);
+    LOG("==========================================");
 
     // Configuración del panel
     HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
@@ -2396,13 +2378,12 @@ void setup()
     timeClient.setTimeOffset(0); // UTC para AWS S3 URLs firmadas
     timeClient.update();
 
-    // Check for updates
-    // Comprobar actualizaciones solo si no estamos en modo DEV
-    if (!DEV) {
-        checkForUpdates();
-    } else {
-        LOG("Modo DEV activo - saltando comprobación inicial de actualizaciones");
-    }
+    // Check for updates on startup
+    #ifndef DEV_MODE
+    checkForUpdates();
+    #else
+    LOG("DEV_MODE active - skipping startup update check");
+    #endif
 
     // OTA migration: if device has frameId but no mqttToken, re-register to get credentials
     if (frameId > 0 && mqttToken.length() == 0) {
