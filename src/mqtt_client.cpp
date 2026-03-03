@@ -5,6 +5,7 @@
 #include "photos.h"
 #include "ota.h"
 #include "mqtt_handlers.h"
+#include "ble_provisioning.h"
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -120,6 +121,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     preferences.putBool("clockEnabled", clockEnabled);
                     LOGF("[MQTT] Clock enabled: %s", clockEnabled ? "true" : "false");
                 }
+                if (doc.containsKey("has_owner")) {
+                    bool hasOwner = doc["has_owner"];
+                    LOGF("[MQTT] has_owner: %s", hasOwner ? "true" : "false");
+                    if (!hasOwner) enterWaitingForOwnerMode();
+                    else exitWaitingForOwnerMode();
+                }
             }
             else if (strcmp(action, "update_bin") == 0)
             {
@@ -183,6 +190,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 showLoadingMsg("Env Vars Reset!");
                 delay(2000);
                 dma_display->clearScreen();
+            }
+            else if (strcmp(action, "unlink") == 0)
+            {
+                LOG("[MQTT] Unlink received - entering waiting-for-owner mode");
+                enterWaitingForOwnerMode();
             }
             // ===== HANDLERS DE DIBUJO =====
             else if (strcmp(action, "enter_draw_mode") == 0)

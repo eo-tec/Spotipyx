@@ -234,6 +234,19 @@ void setup()
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
 
+    // If config indicated no owner, enter waiting mode and skip normal startup
+    if (waitingForOwner) {
+        LOG("[Startup] No owner detected - entering waiting-for-owner mode");
+        // Check for updates before entering waiting mode
+        #ifndef DEV_MODE
+        checkForUpdates();
+        #endif
+        // Initialize WDT so the loop can reset it
+        esp_task_wdt_init(WDT_TIMEOUT, true);
+        esp_task_wdt_add(NULL);
+        return;
+    }
+
     // Check for updates on startup (after MQTT is connected)
     #ifndef DEV_MODE
     checkForUpdates();
@@ -292,6 +305,16 @@ void loop()
         mqttReconnect();
     }else{
         mqttClient.loop();
+    }
+
+    // If waiting for owner, handle BLE and skip normal operation
+    if (waitingForOwner) {
+        if (bleCredentialsReceived && WiFi.status() == WL_CONNECTED) {
+            processBLECredentialsAlreadyConnected();
+        }
+        ArduinoOTA.handle();
+        delay(100);
+        return;
     }
 
     // Verificar y actualizar estado de la pantalla según el horario

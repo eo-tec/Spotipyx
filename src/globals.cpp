@@ -81,6 +81,9 @@ int dirtyMaxX = -1;
 int dirtyMinY = PANEL_RES_Y;
 int dirtyMaxY = -1;
 
+// Waiting for owner mode
+bool waitingForOwner = false;
+
 // BLE provisioning
 NimBLEServer* pBLEServer = nullptr;
 NimBLECharacteristic* pWifiCredentialsChar = nullptr;

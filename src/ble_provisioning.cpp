@@ -226,3 +226,55 @@ bool processBLECredentialsNonBlocking() {
     showLoadingMsg("Waiting BLE...");
     return false;
 }
+
+void enterWaitingForOwnerMode() {
+    if (waitingForOwner) return;
+
+    waitingForOwner = true;
+    bleCredentialsReceived = false;
+    LOG("[Owner] Entering waiting-for-owner mode (BLE active, WiFi/MQTT maintained)");
+
+    // Start BLE if not already running
+    if (pBLEServer == nullptr) {
+        setupBLE();
+    }
+
+    // Show waiting screen
+    dma_display->clearScreen();
+    dma_display->fillScreen(myWHITE);
+    drawLogo();
+    showLoadingMsg("Waiting owner...");
+}
+
+void exitWaitingForOwnerMode() {
+    if (!waitingForOwner) return;
+
+    waitingForOwner = false;
+    LOG("[Owner] Exiting waiting-for-owner mode");
+
+    // Stop BLE
+    if (pBLEServer != nullptr) {
+        NimBLEDevice::deinit(true);
+        pBLEServer = nullptr;
+        pWifiCredentialsChar = nullptr;
+        pResponseChar = nullptr;
+    }
+}
+
+bool processBLECredentialsAlreadyConnected() {
+    if (!bleCredentialsReceived) return false;
+
+    LOG("[Owner] BLE credentials received while already connected to WiFi");
+
+    // WiFi already connected - just send MAC as response, don't reconnect
+    String frameToken = WiFi.macAddress();
+    LOGF("[Owner] Sending frameToken: %s", frameToken.c_str());
+    sendBLEResponse(true, frameToken);
+
+    delay(BLE_RESPONSE_DELAY);
+
+    // Stop BLE and exit waiting mode
+    bleCredentialsReceived = false;
+    exitWaitingForOwnerMode();
+    return true;
+}

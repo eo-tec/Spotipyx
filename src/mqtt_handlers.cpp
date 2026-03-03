@@ -1,5 +1,6 @@
 #include "mqtt_handlers.h"
 #include "config.h"
+#include "ble_provisioning.h"
 
 // Forward declaration (defined in mqtt_client.cpp)
 void mqttCallback(char *topic, byte *payload, unsigned int length);
@@ -210,6 +211,12 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 clockEnabled = doc["clock_enabled"];
                 preferences.putBool("clockEnabled", clockEnabled);
                 LOGF("[MQTT] Config clock enabled: %s", clockEnabled ? "true" : "false");
+            }
+            if (doc.containsKey("has_owner")) {
+                bool hasOwner = doc["has_owner"];
+                LOGF("[MQTT] Config has_owner: %s", hasOwner ? "true" : "false");
+                if (!hasOwner) enterWaitingForOwnerMode();
+                else exitWaitingForOwnerMode();
             }
             mqttResponseSuccess = true;
             LOG("[MQTT] Configuración recibida correctamente");

@@ -127,6 +127,9 @@ extern int drawCommandCount;
 extern unsigned long lastDrawingUpdate;
 extern int dirtyMinX, dirtyMaxX, dirtyMinY, dirtyMaxY;
 
+// Waiting for owner mode (BLE re-entry when no owner)
+extern bool waitingForOwner;
+
 // BLE provisioning
 extern NimBLEServer* pBLEServer;
 extern NimBLECharacteristic* pWifiCredentialsChar;
