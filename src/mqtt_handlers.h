@@ -9,6 +9,8 @@ void handleCoverResponse(byte* payload, unsigned int length);
 void handlePhotoResponse(byte* payload, unsigned int length);
 void handleOtaResponse(byte* payload, unsigned int length);
 void handleConfigResponse(byte* payload, unsigned int length);
+void handleAnimationFrameResponse(byte* payload, unsigned int length);
+void requestAnimationFrame(int animationId, int frameIndex);
 void handleRegisterResponse(byte* payload, unsigned int length);
 void requestConfig();
 bool registerFrameViaMQTT();

@@ -121,10 +121,28 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
             photoAuthor[sizeof(photoAuthor) - 1] = '\0';
         }
 
-        // Copiar datos binarios
+        // Copiar datos binarios (first frame as photo - always works, even for animations)
         memcpy(photoBuffer, payload + jsonEnd + 1, 12288);
         mqttResponseSuccess = true;
-        LOGF("[MQTT] Foto recibida (reqId=%d): %s by %s", mqttRequestId, photoTitle, photoAuthor);
+
+        // Check if this is an animation (new firmware detects extra fields)
+        if (doc.containsKey("animation") && doc["animation"].as<bool>()) {
+            currentAnimationId = doc["animationId"] | -1;
+            animFrameCount = doc["totalFrames"] | 0;
+            animFps = doc["fps"] | 10;
+            animFramesReceived = 0;
+            animReady = false;
+            animPlaying = false;
+            animCurrentFrame = 0;
+            LOGF("[MQTT] Animation detected: id=%d, frames=%d, fps=%d", currentAnimationId, animFrameCount, animFps);
+        } else {
+            // Regular photo: stop any playing animation
+            animPlaying = false;
+            animReady = false;
+            currentAnimationId = -1;
+        }
+
+        LOGF("[MQTT] Photo received (reqId=%d): %s by %s", mqttRequestId, photoTitle, photoAuthor);
     } else {
         LOGF("[MQTT] Foto con formato incorrecto: length=%d, jsonEnd=%d", length, jsonEnd);
         mqttResponseSuccess = false;
@@ -229,6 +247,45 @@ void handleConfigResponse(byte* payload, unsigned int length) {
     }
     mqttResponseReceived = true;
     mqttResponseType = "config";
+}
+
+void handleAnimationFrameResponse(byte* payload, unsigned int length) {
+    if (length < 4 + ANIM_FRAME_SIZE || !animBuffer) {
+        LOGF("[MQTT:anim] Invalid frame (size=%d, buffer=%s)", length, animBuffer ? "ok" : "null");
+        return;
+    }
+
+    uint8_t frameIndex = payload[0];
+    uint8_t totalFrames = payload[1];
+
+    if (frameIndex >= MAX_ANIM_FRAMES || frameIndex >= totalFrames) {
+        LOGF("[MQTT:anim] Frame index out of range: %d/%d", frameIndex, totalFrames);
+        return;
+    }
+
+    memcpy(animBuffer + frameIndex * ANIM_FRAME_SIZE, payload + 4, ANIM_FRAME_SIZE);
+    animFramesReceived++;
+    LOGF("[MQTT:anim] Frame %d/%d received (%d/%d total)", frameIndex, totalFrames, animFramesReceived, animFrameCount);
+
+    if (animFramesReceived >= animFrameCount) {
+        animReady = true;
+        animPlaying = true;
+        animCurrentFrame = 0;
+        animLastFrameTime = millis();
+        LOG("[MQTT:anim] All frames received, starting playback");
+    } else {
+        // Request next frame
+        requestAnimationFrame(currentAnimationId, frameIndex + 1);
+    }
+}
+
+void requestAnimationFrame(int animationId, int frameIndex) {
+    char topic[64];
+    snprintf(topic, sizeof(topic), "frame/%d/request/animation/frame", frameId);
+    char payload[64];
+    snprintf(payload, sizeof(payload), "{\"animationId\":%d,\"frame\":%d}", animationId, frameIndex);
+    mqttClient.publish(topic, payload);
+    LOGF("[MQTT:anim] Requesting frame %d of animation %d", frameIndex, animationId);
 }
 
 void handleRegisterResponse(byte* payload, unsigned int length) {

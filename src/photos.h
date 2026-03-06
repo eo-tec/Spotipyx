@@ -14,5 +14,8 @@ void displayPhotoWithFade();
 void displayPhotoFromCenter();
 void showPhotoInfo(String title, String name);
 void updatePhotoInfo();
+void startAnimationDownloadIfNeeded();
+void updateAnimationPlayback();
+void stopAnimation();
 
 #endif

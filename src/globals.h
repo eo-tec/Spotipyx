@@ -127,6 +127,19 @@ extern int drawCommandCount;
 extern unsigned long lastDrawingUpdate;
 extern int dirtyMinX, dirtyMaxX, dirtyMinY, dirtyMaxY;
 
+// Animation playback
+#define MAX_ANIM_FRAMES 20
+#define ANIM_FRAME_SIZE (PANEL_RES_X * PANEL_RES_Y * 2) // 8192 bytes RGB565
+extern uint8_t* animBuffer; // allocated dynamically when needed
+extern uint8_t animFrameCount;
+extern uint8_t animFps;
+extern uint8_t animFramesReceived;
+extern bool animReady;
+extern bool animPlaying;
+extern int currentAnimationId;
+extern uint8_t animCurrentFrame;
+extern unsigned long animLastFrameTime;
+
 // Waiting for owner mode (BLE re-entry when no owner)
 extern bool waitingForOwner;
 

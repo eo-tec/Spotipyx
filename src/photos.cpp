@@ -62,6 +62,7 @@ void showPhoto(int index)
         esp_task_wdt_reset();
         LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         displayPhotoWithFade();
+        startAnimationDownloadIfNeeded();
     } else {
         LOG("[Photo] Error recibiendo foto via MQTT");
     }
@@ -98,6 +99,7 @@ void showPhotoById(int id)
         esp_task_wdt_reset();
         LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         displayPhotoWithFade();
+        startAnimationDownloadIfNeeded();
     } else {
         LOG("[Photo] Error recibiendo foto via MQTT");
     }
@@ -192,6 +194,7 @@ void showPhotoFromCenterById(int id)
         esp_task_wdt_reset();
         LOGF("[PhotoCenter] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         displayPhotoFromCenter();
+        startAnimationDownloadIfNeeded();
     } else {
         LOG("[PhotoCenter] Error recibiendo foto via MQTT");
     }
@@ -344,6 +347,64 @@ void showPhotoInfo(String title, String name)
             dma_display->setCursor(1, nameY);
             dma_display->print(name);
         }
+    }
+}
+
+void startAnimationDownloadIfNeeded() {
+    if (currentAnimationId > 0 && animFrameCount > 0 && !animReady) {
+        // Allocate buffer if needed
+        size_t needed = animFrameCount * ANIM_FRAME_SIZE;
+        if (animBuffer) {
+            free(animBuffer);
+            animBuffer = nullptr;
+        }
+        animBuffer = (uint8_t*)malloc(needed);
+        if (!animBuffer) {
+            LOGF("[Anim] Failed to allocate %d bytes for animation buffer (free heap: %d)", needed, ESP.getFreeHeap());
+            currentAnimationId = -1;
+            animFrameCount = 0;
+            return;
+        }
+        LOGF("[Anim] Allocated %d bytes, starting download of %d frames (free heap: %d)", needed, animFrameCount, ESP.getFreeHeap());
+        animFramesReceived = 0;
+        requestAnimationFrame(currentAnimationId, 0);
+    }
+}
+
+void drawAnimationFrame(uint8_t frameIndex) {
+    uint8_t* frame = animBuffer + frameIndex * ANIM_FRAME_SIZE;
+    for (int y = 0; y < PANEL_RES_Y; y++) {
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            int idx = (y * PANEL_RES_X + x) * 2;
+            uint16_t color = (frame[idx] << 8) | frame[idx + 1];
+            dma_display->drawPixel(x, y, color);
+        }
+    }
+}
+
+void updateAnimationPlayback() {
+    if (!animPlaying || !animReady || animFrameCount == 0 || !animBuffer) return;
+
+    unsigned long now = millis();
+    unsigned long interval = 1000 / animFps;
+
+    if (now - animLastFrameTime >= interval) {
+        drawAnimationFrame(animCurrentFrame);
+        animCurrentFrame = (animCurrentFrame + 1) % animFrameCount;
+        animLastFrameTime = now;
+    }
+}
+
+void stopAnimation() {
+    animPlaying = false;
+    animReady = false;
+    currentAnimationId = -1;
+    animFrameCount = 0;
+    animFramesReceived = 0;
+    if (animBuffer) {
+        free(animBuffer);
+        animBuffer = nullptr;
+        LOGF("[Anim] Buffer freed (free heap: %d)", ESP.getFreeHeap());
     }
 }
 

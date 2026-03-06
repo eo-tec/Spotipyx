@@ -81,6 +81,17 @@ int dirtyMaxX = -1;
 int dirtyMinY = PANEL_RES_Y;
 int dirtyMaxY = -1;
 
+// Animation playback
+uint8_t* animBuffer = nullptr;
+uint8_t animFrameCount = 0;
+uint8_t animFps = 10;
+uint8_t animFramesReceived = 0;
+bool animReady = false;
+bool animPlaying = false;
+int currentAnimationId = -1;
+uint8_t animCurrentFrame = 0;
+unsigned long animLastFrameTime = 0;
+
 // Waiting for owner mode
 bool waitingForOwner = false;
 

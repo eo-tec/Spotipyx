@@ -31,6 +31,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         else if (topicStr.endsWith("/response/register")) {
             handleRegisterResponse(payload, length);
         }
+        else if (topicStr.endsWith("/response/animation/frame")) {
+            handleAnimationFrameResponse(payload, length);
+        }
         return;  // No procesar como comando normal
     }
 

@@ -368,6 +368,7 @@ void loop()
         } else {
             if (songShowing != songOnline) {
                 songShowing = songOnline;
+                stopAnimation();
                 fetchAndDrawCover();
             }
         }
@@ -383,8 +384,13 @@ void loop()
         }
     }
 
-    // Actualizar el scroll del título si es necesario
-    updatePhotoInfo();
+    // Actualizar el scroll del título si es necesario (solo si no hay animación reproduciéndose)
+    if (!animPlaying) {
+        updatePhotoInfo();
+    }
+
+    // Reproducir animación frame a frame
+    updateAnimationPlayback();
 
     // Actualizar reloj cada 60 segundos
     if (clockEnabled && millis() - lastClockUpdate >= 60000) {
@@ -392,5 +398,5 @@ void loop()
         lastClockUpdate = millis();
     }
 
-    wait(100);
+    wait(animPlaying ? 5 : 100);
 }
