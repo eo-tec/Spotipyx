@@ -29,6 +29,7 @@ void displayPhotoWithFade()
     fadeIn();
     showPhotoInfo(String(photoTitle), String(photoAuthor));
     showClockOverlay();
+    showDevOverlay();
 }
 
 void showPhoto(int index)

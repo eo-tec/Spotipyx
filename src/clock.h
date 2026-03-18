@@ -5,5 +5,6 @@
 
 void showTime();
 void showClockOverlay();
+void showDevOverlay();
 
 #endif

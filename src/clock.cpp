@@ -18,6 +18,25 @@ void showTime()
     LOGF("Hora: %s", currentTime.c_str());
 }
 
+void showDevOverlay() {
+#ifdef DEV_MODE
+    dma_display->setFont(&Picopixel);
+    dma_display->setTextSize(1);
+
+    int16_t x1, y1;
+    uint16_t w, h;
+    dma_display->getTextBounds("DEV", 0, 0, &x1, &y1, &w, &h);
+
+    int xPos = 2;       // 2px margen izquierdo
+    int yPos = h + 1;   // 1px margen superior
+
+    dma_display->fillRect(0, 0, w + 4, h + 2, myBLACK);
+    dma_display->setTextColor(dma_display->color565(255, 50, 50)); // Rojo
+    dma_display->setCursor(xPos, yPos);
+    dma_display->print("DEV");
+#endif
+}
+
 void showClockOverlay() {
     if (!clockEnabled) return;
 
