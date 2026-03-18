@@ -25,16 +25,29 @@ void showDevOverlay() {
 
     int16_t x1, y1;
     uint16_t w, h;
-    dma_display->getTextBounds("DEV", 0, 0, &x1, &y1, &w, &h);
+    dma_display->getTextBounds("Dev", 0, 0, &x1, &y1, &w, &h);
 
     int xPos = 2;       // 2px margen izquierdo
-    int yPos = h + 1;   // 1px margen superior
+    int yPos = h;        // texto 1px más arriba
 
     dma_display->fillRect(0, 0, w + 4, h + 2, myBLACK);
     dma_display->setTextColor(dma_display->color565(255, 50, 50)); // Rojo
     dma_display->setCursor(xPos, yPos);
-    dma_display->print("DEV");
+    dma_display->print("Dev");
 #endif
+}
+
+void hideClockOverlay() {
+    // Restaurar píxeles originales de la foto en la zona del reloj
+    // Usamos un área generosa en la esquina superior derecha
+    int rectX = PANEL_RES_X - 30;
+    int rectW = 30;
+    int rectH = 8;
+    for (int y = 0; y < rectH; y++) {
+        for (int x = rectX; x < PANEL_RES_X; x++) {
+            dma_display->drawPixel(x, y, screenBuffer[y][x]);
+        }
+    }
 }
 
 void showClockOverlay() {
@@ -60,7 +73,7 @@ void showClockOverlay() {
     dma_display->getTextBounds(timeStr, 0, 0, &x1, &y1, &w, &h);
 
     int xPos = PANEL_RES_X - w - 2;  // 2px margen derecho
-    int yPos = h + 1;                  // 1px margen superior
+    int yPos = h;                      // texto 1px más arriba
 
     // Fondo negro para legibilidad
     dma_display->fillRect(xPos - 1, 0, w + 3, h + 2, myBLACK);

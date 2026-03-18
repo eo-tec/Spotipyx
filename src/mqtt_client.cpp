@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "mqtt_handlers.h"
 #include "ble_provisioning.h"
+#include "clock.h"
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
@@ -120,9 +121,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     LOGF("[MQTT] Timezone offset: %d", timezoneOffset);
                 }
                 if (doc.containsKey("clock_enabled")) {
+                    bool wasEnabled = clockEnabled;
                     clockEnabled = doc["clock_enabled"];
                     preferences.putBool("clockEnabled", clockEnabled);
                     LOGF("[MQTT] Clock enabled: %s", clockEnabled ? "true" : "false");
+                    if (clockEnabled && !wasEnabled) {
+                        showClockOverlay();
+                    } else if (!clockEnabled && wasEnabled) {
+                        hideClockOverlay();
+                    }
                 }
                 if (doc.containsKey("has_owner")) {
                     bool hasOwner = doc["has_owner"];
