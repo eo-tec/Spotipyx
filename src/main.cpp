@@ -28,6 +28,17 @@ void setup()
     LOG("- OTA updates: ENABLED");
     #endif
     LOGF("- MQTT broker: %s:%d", MQTT_BROKER_URL, MQTT_BROKER_PORT);
+    LOGF("- Free heap: %d bytes", ESP.getFreeHeap());
+    hasPsram = psramFound();
+    if (hasPsram) {
+        animFrameWidth = 64;
+        animFrameSize = ANIM_FRAME_SIZE_64;
+    } else {
+        animFrameWidth = 32;
+        animFrameSize = ANIM_FRAME_SIZE_32;
+    }
+    LOGF("- PSRAM: %s → animation frames: %dx%d (%d bytes/frame)",
+         hasPsram ? "YES" : "NO", animFrameWidth, animFrameWidth, animFrameSize);
     LOG("==========================================");
 
     // Configuración del panel
@@ -168,7 +179,7 @@ void setup()
     mqttClient.setServer(MQTT_BROKER_URL, MQTT_BROKER_PORT);
     mqttClient.setCallback(mqttCallback);
     mqttClient.setKeepAlive(60);
-    mqttClient.setBufferSize(16384);
+    mqttClient.setBufferSize(13000); // fits photo response (~12.5KB) and anim frames (8.2KB)
 
     // Configuración de OTA
     ArduinoOTA.setHostname(("Frame-" + String(frameId)).c_str());
@@ -356,7 +367,9 @@ void loop()
                 songShowing = "";
                 lastPhotoChange = 0;
             }
-            if (millis() - lastPhotoChange >= secsPhotos) {
+            // Don't change photo while animation is downloading or playing
+            bool animBusy = (currentAnimationId > 0) || animPlaying;
+            if (!animBusy && millis() - lastPhotoChange >= secsPhotos) {
                 if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
@@ -373,7 +386,8 @@ void loop()
             }
         }
     } else {
-        if (millis() - lastPhotoChange >= secsPhotos) {
+        bool animBusy = (currentAnimationId > 0) || animPlaying;
+        if (!animBusy && millis() - lastPhotoChange >= secsPhotos) {
             if (photoIndex >= maxPhotos) {
                 photoIndex = 0;
             }

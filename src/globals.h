@@ -129,7 +129,11 @@ extern int dirtyMinX, dirtyMaxX, dirtyMinY, dirtyMaxY;
 
 // Animation playback
 #define MAX_ANIM_FRAMES 20
-#define ANIM_FRAME_SIZE (PANEL_RES_X * PANEL_RES_Y * 2) // 8192 bytes RGB565
+#define ANIM_FRAME_SIZE_64 (64 * 64 * 2) // 8192 bytes RGB565
+#define ANIM_FRAME_SIZE_32 (32 * 32 * 2) // 2048 bytes RGB565
+extern bool hasPsram;
+extern uint8_t animFrameWidth;   // 64 or 32 depending on PSRAM
+extern uint16_t animFrameSize;   // bytes per frame (8192 or 2048)
 extern uint8_t* animBuffer; // allocated dynamically when needed
 extern uint8_t animFrameCount;
 extern uint8_t animFps;
@@ -139,6 +143,9 @@ extern bool animPlaying;
 extern int currentAnimationId;
 extern uint8_t animCurrentFrame;
 extern unsigned long animLastFrameTime;
+extern unsigned long animLoopCount;
+extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
+extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
 
 // Waiting for owner mode (BLE re-entry when no owner)
 extern bool waitingForOwner;

@@ -353,32 +353,83 @@ void showPhotoInfo(String title, String name)
 
 void startAnimationDownloadIfNeeded() {
     if (currentAnimationId > 0 && animFrameCount > 0 && !animReady) {
-        // Allocate buffer if needed
-        size_t needed = animFrameCount * ANIM_FRAME_SIZE;
         if (animBuffer) {
             free(animBuffer);
             animBuffer = nullptr;
         }
-        animBuffer = (uint8_t*)malloc(needed);
+
+        uint8_t totalBackendFrames = animFrameCount;
+        uint8_t framesToUse = totalBackendFrames;
+        animFrameStep = 1;
+
+        if (!hasPsram) {
+            // Limit frames to fit in largest contiguous free block (with 8KB safety margin)
+            size_t maxBlock = ESP.getMaxAllocHeap();
+            size_t safeBlock = maxBlock > 8192 ? maxBlock - 8192 : 0;
+            uint8_t maxFrames = safeBlock / animFrameSize;
+
+            if (maxFrames < 2) {
+                LOGF("[Anim] Not enough RAM for animation (largest block: %d)", maxBlock);
+                currentAnimationId = -1;
+                animFrameCount = 0;
+                return;
+            }
+
+            if (maxFrames < totalBackendFrames) {
+                // Sample evenly to cover full duration
+                animFrameStep = (totalBackendFrames + maxFrames - 1) / maxFrames; // ceil division
+                framesToUse = totalBackendFrames / animFrameStep;
+                if (framesToUse < 2) framesToUse = 2;
+            }
+        }
+
+        size_t needed = framesToUse * animFrameSize;
+        if (hasPsram) {
+            animBuffer = (uint8_t*)ps_malloc(needed);
+        } else {
+            animBuffer = (uint8_t*)malloc(needed);
+        }
         if (!animBuffer) {
-            LOGF("[Anim] Failed to allocate %d bytes for animation buffer (free heap: %d)", needed, ESP.getFreeHeap());
+            LOGF("[Anim] Failed to allocate %d bytes (free heap: %d, largest block: %d)", needed, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
             currentAnimationId = -1;
             animFrameCount = 0;
             return;
         }
-        LOGF("[Anim] Allocated %d bytes, starting download of %d frames (free heap: %d)", needed, animFrameCount, ESP.getFreeHeap());
+
+        // Adjust playback interval to maintain original duration
+        // Original duration = totalBackendFrames / animFps seconds
+        // We have framesToUse frames → interval = duration / framesToUse
+        animFrameInterval = (unsigned long)totalBackendFrames * 1000 / animFps / framesToUse;
+        animFrameCount = framesToUse;
+
+        LOGF("[Anim] %d/%d frames (step=%d, %dx%d, %s), interval=%dms",
+             framesToUse, totalBackendFrames, animFrameStep,
+             animFrameWidth, animFrameWidth, hasPsram ? "PSRAM" : "RAM",
+             animFrameInterval);
         animFramesReceived = 0;
         requestAnimationFrame(currentAnimationId, 0);
     }
 }
 
 void drawAnimationFrame(uint8_t frameIndex) {
-    uint8_t* frame = animBuffer + frameIndex * ANIM_FRAME_SIZE;
-    for (int y = 0; y < PANEL_RES_Y; y++) {
-        for (int x = 0; x < PANEL_RES_X; x++) {
-            int idx = (y * PANEL_RES_X + x) * 2;
-            uint16_t color = (frame[idx] << 8) | frame[idx + 1];
-            dma_display->drawPixel(x, y, color);
+    uint8_t* frame = animBuffer + frameIndex * animFrameSize;
+    if (animFrameWidth == 64) {
+        // Full resolution: 1:1 pixel mapping
+        for (int y = 0; y < 64; y++) {
+            for (int x = 0; x < 64; x++) {
+                int idx = (y * 64 + x) * 2;
+                uint16_t color = (frame[idx] << 8) | frame[idx + 1];
+                dma_display->drawPixel(x, y, color);
+            }
+        }
+    } else {
+        // 32x32: scale up 2x2 per pixel
+        for (int y = 0; y < 32; y++) {
+            for (int x = 0; x < 32; x++) {
+                int idx = (y * 32 + x) * 2;
+                uint16_t color = (frame[idx] << 8) | frame[idx + 1];
+                dma_display->fillRect(x * 2, y * 2, 2, 2, color);
+            }
         }
     }
 }
@@ -387,12 +438,24 @@ void updateAnimationPlayback() {
     if (!animPlaying || !animReady || animFrameCount == 0 || !animBuffer) return;
 
     unsigned long now = millis();
-    unsigned long interval = 1000 / animFps;
 
-    if (now - animLastFrameTime >= interval) {
+    if (now - animLastFrameTime >= animFrameInterval) {
         drawAnimationFrame(animCurrentFrame);
-        animCurrentFrame = (animCurrentFrame + 1) % animFrameCount;
+        animCurrentFrame++;
+        if (animCurrentFrame >= animFrameCount) {
+            animCurrentFrame = 0;
+            animLoopCount++;
+        }
         animLastFrameTime = now;
+
+        // Stop after N loops — show animation for ~secsPhotos duration
+        unsigned long animDuration = (unsigned long)animFrameCount * 1000 / animFps; // one loop ms
+        unsigned long maxLoops = max(3UL, secsPhotos / animDuration);
+        if (animLoopCount >= maxLoops) {
+            LOG("[Anim] Playback finished (loop limit reached)");
+            stopAnimation();
+            lastPhotoChange = millis(); // reset timer so next photo shows after interval
+        }
     }
 }
 
@@ -402,6 +465,9 @@ void stopAnimation() {
     currentAnimationId = -1;
     animFrameCount = 0;
     animFramesReceived = 0;
+    animLoopCount = 0;
+    animFrameStep = 1;
+    animFrameInterval = 200;
     if (animBuffer) {
         free(animBuffer);
         animBuffer = nullptr;

@@ -82,6 +82,9 @@ int dirtyMinY = PANEL_RES_Y;
 int dirtyMaxY = -1;
 
 // Animation playback
+bool hasPsram = false;
+uint8_t animFrameWidth = 32;      // default to 32x32 (no PSRAM)
+uint16_t animFrameSize = ANIM_FRAME_SIZE_32;
 uint8_t* animBuffer = nullptr;
 uint8_t animFrameCount = 0;
 uint8_t animFps = 10;
@@ -91,6 +94,9 @@ bool animPlaying = false;
 int currentAnimationId = -1;
 uint8_t animCurrentFrame = 0;
 unsigned long animLastFrameTime = 0;
+unsigned long animLoopCount = 0;
+uint8_t animFrameStep = 1;
+unsigned long animFrameInterval = 200;
 
 // Waiting for owner mode
 bool waitingForOwner = false;
