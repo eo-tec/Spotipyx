@@ -127,6 +127,12 @@ extern int drawCommandCount;
 extern unsigned long lastDrawingUpdate;
 extern int dirtyMinX, dirtyMaxX, dirtyMinY, dirtyMaxY;
 
+// Overlay bitmask: marks pixels occupied by title/author/clock (64x64 = 512 bytes)
+extern uint8_t overlayMask[64][8]; // 64 rows × 64 bits (8 bytes per row)
+void overlayMaskSet(int x, int y);
+bool overlayMaskGet(int x, int y);
+void overlayMaskClear();
+
 // Animation playback
 #define MAX_ANIM_FRAMES 20
 #define ANIM_FRAME_SIZE_64 (64 * 64 * 2) // 8192 bytes RGB565

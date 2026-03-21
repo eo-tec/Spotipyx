@@ -81,6 +81,22 @@ int dirtyMaxX = -1;
 int dirtyMinY = PANEL_RES_Y;
 int dirtyMaxY = -1;
 
+// Overlay bitmask
+uint8_t overlayMask[64][8] = {};
+
+void overlayMaskSet(int x, int y) {
+    if (x >= 0 && x < 64 && y >= 0 && y < 64)
+        overlayMask[y][x / 8] |= (1 << (x % 8));
+}
+
+bool overlayMaskGet(int x, int y) {
+    return (overlayMask[y][x / 8] >> (x % 8)) & 1;
+}
+
+void overlayMaskClear() {
+    memset(overlayMask, 0, sizeof(overlayMask));
+}
+
 // Animation playback
 bool hasPsram = false;
 uint8_t animFrameWidth = 32;      // default to 32x32 (no PSRAM)

@@ -4,6 +4,53 @@
 #include "mqtt_handlers.h"
 #include <Fonts/Picopixel.h>
 
+// Mark a rectangle in the overlay bitmask
+void markOverlayRegion(int x, int y, int w, int h) {
+    for (int row = max(0, y); row < min(64, y + h); row++) {
+        for (int col = max(0, x); col < min(64, x + w); col++) {
+            overlayMaskSet(col, row);
+        }
+    }
+}
+
+// Build overlay bitmask from current title/author/clock positions
+void buildOverlayMask() {
+    overlayMaskClear();
+    dma_display->setFont(&Picopixel);
+    dma_display->setTextSize(1);
+
+    // Title region
+    if (currentTitle.length() > 0) {
+        int16_t x1, y1;
+        uint16_t w, h;
+        dma_display->getTextBounds(currentTitle, 1, titleY, &x1, &y1, &w, &h);
+        // Mark the full width for scrolling titles, or just the text width
+        int rectW = titleNeedsScroll ? PANEL_RES_X : w + 3;
+        markOverlayRegion(0, y1 - 1, rectW, h + 2);
+    }
+
+    // Author name region
+    if (currentName.length() > 0) {
+        int16_t x1, y1;
+        uint16_t w, h;
+        dma_display->getTextBounds(currentName, 0, 0, &x1, &y1, &w, &h);
+        int nameX = PANEL_RES_X - w;
+        dma_display->getTextBounds(currentName, nameX, nameY, &x1, &y1, &w, &h);
+        markOverlayRegion(nameX - 1, y1 - 1, w + 2, h + 2);
+    }
+
+    // Clock region (top-right corner)
+    if (clockEnabled) {
+        // Clock uses ~30x8 pixels in top-right
+        markOverlayRegion(PANEL_RES_X - 30, 0, 30, 8);
+    }
+
+    #ifdef DEV_MODE
+    // Dev overlay (top-left)
+    markOverlayRegion(0, 0, 18, 8);
+    #endif
+}
+
 void displayPhotoWithFade()
 {
     // Solo hacer fadeOut DESPUÉS de confirmar que la imagen está completa
@@ -27,6 +74,7 @@ void displayPhotoWithFade()
     }
 
     fadeIn();
+
     showPhotoInfo(String(photoTitle), String(photoAuthor));
     showClockOverlay();
     showDevOverlay();
@@ -407,28 +455,34 @@ void startAnimationDownloadIfNeeded() {
              animFrameWidth, animFrameWidth, hasPsram ? "PSRAM" : "RAM",
              animFrameInterval);
         animFramesReceived = 0;
+        buildOverlayMask(); // snapshot which pixels are overlays before animation starts
         requestAnimationFrame(currentAnimationId, 0);
     }
 }
 
 void drawAnimationFrame(uint8_t frameIndex) {
     uint8_t* frame = animBuffer + frameIndex * animFrameSize;
+
     if (animFrameWidth == 64) {
-        // Full resolution: 1:1 pixel mapping
         for (int y = 0; y < 64; y++) {
             for (int x = 0; x < 64; x++) {
+                if (overlayMaskGet(x, y)) continue; // skip overlay pixels
                 int idx = (y * 64 + x) * 2;
                 uint16_t color = (frame[idx] << 8) | frame[idx + 1];
                 dma_display->drawPixel(x, y, color);
             }
         }
     } else {
-        // 32x32: scale up 2x2 per pixel
         for (int y = 0; y < 32; y++) {
             for (int x = 0; x < 32; x++) {
+                int px = x * 2, py = y * 2;
                 int idx = (y * 32 + x) * 2;
                 uint16_t color = (frame[idx] << 8) | frame[idx + 1];
-                dma_display->fillRect(x * 2, y * 2, 2, 2, color);
+                // Draw 2x2 block, skipping overlay pixels
+                if (!overlayMaskGet(px, py))     dma_display->drawPixel(px, py, color);
+                if (!overlayMaskGet(px+1, py))   dma_display->drawPixel(px+1, py, color);
+                if (!overlayMaskGet(px, py+1))   dma_display->drawPixel(px, py+1, color);
+                if (!overlayMaskGet(px+1, py+1)) dma_display->drawPixel(px+1, py+1, color);
             }
         }
     }
@@ -468,6 +522,7 @@ void stopAnimation() {
     animLoopCount = 0;
     animFrameStep = 1;
     animFrameInterval = 200;
+    overlayMaskClear();
     if (animBuffer) {
         free(animBuffer);
         animBuffer = nullptr;
