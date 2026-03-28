@@ -27,9 +27,10 @@ void checkForUpdates()
 
     LOG("[OTA] Solicitando información de actualización via MQTT");
 
-    // Publicar request via MQTT
+    // Publicar request via MQTT con hw_version
     String topic = String("frame/") + String(frameId) + "/request/ota";
-    if (!mqttClient.publish(topic.c_str(), "{}")) {
+    String payload = String("{\"hw_version\":\"") + HW_VERSION + "\"}";
+    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[OTA] Error publicando request MQTT");
         return;
     }
