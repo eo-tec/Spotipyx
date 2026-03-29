@@ -71,11 +71,11 @@ void setup()
     }
     secsPhotos = preferences.getUInt("secsPhotos", 30000);
     // Cargar configuración de horario
-    scheduleEnabled = preferences.getBool("scheduleEnabled", false);
+    scheduleEnabled = preferences.getBool("schEnabled", false);
     scheduleOnHour = preferences.getInt("scheduleOnHour", 8);
-    scheduleOnMinute = preferences.getInt("scheduleOnMinute", 0);
+    scheduleOnMinute = preferences.getInt("schOnMin", 0);
     scheduleOffHour = preferences.getInt("scheduleOffHour", 22);
-    scheduleOffMinute = preferences.getInt("scheduleOffMinute", 0);
+    scheduleOffMinute = preferences.getInt("schOffMin", 0);
     timezoneOffset = preferences.getInt("timezoneOffset", 0);
     clockEnabled = preferences.getBool("clockEnabled", false);
     mqttToken = preferences.getString("mqttToken", "");

@@ -197,7 +197,7 @@ void handleConfigResponse(byte* payload, unsigned int length) {
             }
             if (doc.containsKey("schedule_enabled")) {
                 scheduleEnabled = doc["schedule_enabled"];
-                preferences.putBool("scheduleEnabled", scheduleEnabled);
+                preferences.putBool("schEnabled", scheduleEnabled);
                 LOGF("[MQTT] Config schedule enabled: %s", scheduleEnabled ? "true" : "false");
             }
             if (doc.containsKey("schedule_on_hour")) {
@@ -207,7 +207,7 @@ void handleConfigResponse(byte* payload, unsigned int length) {
             }
             if (doc.containsKey("schedule_on_minute")) {
                 scheduleOnMinute = doc["schedule_on_minute"];
-                preferences.putInt("scheduleOnMinute", scheduleOnMinute);
+                preferences.putInt("schOnMin", scheduleOnMinute);
                 LOGF("[MQTT] Config schedule on minute: %d", scheduleOnMinute);
             }
             if (doc.containsKey("schedule_off_hour")) {
@@ -217,7 +217,7 @@ void handleConfigResponse(byte* payload, unsigned int length) {
             }
             if (doc.containsKey("schedule_off_minute")) {
                 scheduleOffMinute = doc["schedule_off_minute"];
-                preferences.putInt("scheduleOffMinute", scheduleOffMinute);
+                preferences.putInt("schOffMin", scheduleOffMinute);
                 LOGF("[MQTT] Config schedule off minute: %d", scheduleOffMinute);
             }
             if (doc.containsKey("timezone_offset")) {
