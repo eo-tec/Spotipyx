@@ -317,6 +317,11 @@ void showPhotoInfo(String title, String name)
     currentTitle = title;
     currentName = name;
 
+    // Si la "foto" es una animación que todavía se está descargando, calculamos el
+    // layout igual (para reservar la región del título en el overlay), pero en lugar
+    // de pintar el título mostramos un spinner del tamaño de un carácter.
+    bool loadingAnim = (currentAnimationId > 0 && !animReady);
+
     // Margen entre textos cuando están en la misma línea
     const int horizontalMargin = 4;
 
@@ -342,13 +347,13 @@ void showPhotoInfo(String title, String name)
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
                 dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
                 dma_display->setCursor(1, titleY);
-                dma_display->print(title);
+                if (!loadingAnim) dma_display->print(title);
             } else {
                 titleNeedsScroll = false;
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
                 dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
                 dma_display->setCursor(1, titleY);
-                dma_display->print(title);
+                if (!loadingAnim) dma_display->print(title);
             }
         }
 
@@ -380,13 +385,13 @@ void showPhotoInfo(String title, String name)
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
                 dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
                 dma_display->setCursor(1, titleY);
-                dma_display->print(title);
+                if (!loadingAnim) dma_display->print(title);
             } else {
                 titleNeedsScroll = false;
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
                 dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
                 dma_display->setCursor(1, titleY);
-                dma_display->print(title);
+                if (!loadingAnim) dma_display->print(title);
             }
         }
 
@@ -397,6 +402,45 @@ void showPhotoInfo(String title, String name)
             dma_display->print(name);
         }
     }
+
+    // Animación descargándose: pintamos el spinner en la zona del título
+    if (loadingAnim) {
+        animSpinnerActive = true;
+        spinnerFrame = 0;
+        lastSpinnerUpdate = millis();
+        drawLoadingSpinner();
+    } else {
+        animSpinnerActive = false;
+    }
+}
+
+// Spinner de carga del tamaño de un carácter, dibujado donde iría el título.
+// Un punto gira en círculo (8 posiciones) con una pequeña estela para indicar
+// que la animación se está descargando.
+void drawLoadingSpinner() {
+    const int cx = 3;             // centro del spinner (zona del título, izquierda)
+    const int cy = titleY - 3;
+    // 8 posiciones alrededor del centro, en sentido horario desde arriba
+    static const int8_t dx[8] = {  0,  2,  2,  2,  0, -2, -2, -2 };
+    static const int8_t dy[8] = { -2, -2,  0,  2,  2,  2,  0, -2 };
+
+    // Caja fija de un carácter en la esquina inferior izquierda
+    dma_display->fillRect(0, titleY - 6, 7, 8, myBLACK);
+
+    uint8_t i = spinnerFrame & 0x07;
+    uint8_t prev = (i + 7) & 0x07; // posición anterior (estela)
+    uint16_t gray = dma_display->color565(70, 70, 70);
+    dma_display->drawPixel(cx + dx[prev], cy + dy[prev], gray);
+    dma_display->drawPixel(cx + dx[i], cy + dy[i], myWHITE);
+}
+
+// Avanza el spinner periódicamente mientras la animación se descarga.
+void updateLoadingSpinner() {
+    const unsigned long SPINNER_INTERVAL = 90; // ms entre pasos (8 pasos ≈ 0,7s/vuelta)
+    if (millis() - lastSpinnerUpdate < SPINNER_INTERVAL) return;
+    spinnerFrame++;
+    lastSpinnerUpdate = millis();
+    drawLoadingSpinner();
 }
 
 void startAnimationDownloadIfNeeded() {
@@ -455,8 +499,17 @@ void startAnimationDownloadIfNeeded() {
              animFrameWidth, animFrameWidth, hasPsram ? "PSRAM" : "RAM",
              animFrameInterval);
         animFramesReceived = 0;
+        animFramesBitmap = 0;
+        animRetryCount = 0;
         buildOverlayMask(); // snapshot which pixels are overlays before animation starts
-        requestAnimationFrame(currentAnimationId, 0);
+
+        // Pipelined download: publish all frame requests up front so the backend
+        // can serve them from its cache without N round-trips.
+        for (uint8_t slot = 0; slot < animFrameCount; slot++) {
+            requestAnimationFrame(currentAnimationId, slot * animFrameStep);
+            mqttClient.loop(); // flush TX and drain any responses already arriving
+        }
+        animDownloadStartTime = millis();
     }
 }
 
@@ -508,7 +561,9 @@ void updateAnimationPlayback() {
         if (animLoopCount >= maxLoops) {
             LOG("[Anim] Playback finished (loop limit reached)");
             stopAnimation();
-            lastPhotoChange = millis(); // reset timer so next photo shows after interval
+            // No reseteamos lastPhotoChange: la reproduccion ya consumio el intervalo
+            // (maxLoops esta calculado para durar ~secsPhotos), asi que la siguiente
+            // foto sale enseguida en vez de dejar el ultimo frame congelado.
         }
     }
 }
@@ -519,15 +574,52 @@ void stopAnimation() {
     currentAnimationId = -1;
     animFrameCount = 0;
     animFramesReceived = 0;
+    animFramesBitmap = 0;
     animLoopCount = 0;
     animFrameStep = 1;
     animFrameInterval = 200;
+    animRetryCount = 0;
+    animDownloadStartTime = 0;
+    animSpinnerActive = false;
     overlayMaskClear();
     if (animBuffer) {
         free(animBuffer);
         animBuffer = nullptr;
         LOGF("[Anim] Buffer freed (free heap: %d)", ESP.getFreeHeap());
     }
+}
+
+// Re-requests any frames still missing after a timeout window.
+// Called from the main loop; cheap when there's no animation downloading.
+void checkAnimationDownloadTimeout() {
+    if (animReady || currentAnimationId <= 0 || animBuffer == nullptr) return;
+    if (animDownloadStartTime == 0) return;
+
+    const unsigned long ANIM_DOWNLOAD_TIMEOUT_MS = 5000;
+    const uint8_t ANIM_MAX_RETRIES = 3;
+
+    if (millis() - animDownloadStartTime < ANIM_DOWNLOAD_TIMEOUT_MS) return;
+
+    if (animRetryCount >= ANIM_MAX_RETRIES) {
+        LOGF("[Anim] Giving up after %d retries (%d/%d frames)",
+             animRetryCount, animFramesReceived, animFrameCount);
+        stopAnimation(); // tambien apaga animSpinnerActive
+        // El primer frame queda como foto estática: mostramos ya su título real
+        showPhotoInfo(currentTitle, currentName);
+        return;
+    }
+
+    uint8_t missing = 0;
+    for (uint8_t slot = 0; slot < animFrameCount; slot++) {
+        if (!(animFramesBitmap & (1UL << slot))) {
+            requestAnimationFrame(currentAnimationId, slot * animFrameStep);
+            mqttClient.loop();
+            missing++;
+        }
+    }
+    animRetryCount++;
+    animDownloadStartTime = millis();
+    LOGF("[Anim] Retry %d: re-requested %d missing frames", animRetryCount, missing);
 }
 
 void updatePhotoInfo() {

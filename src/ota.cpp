@@ -29,7 +29,7 @@ void checkForUpdates()
 
     // Publicar request via MQTT con hw_version
     String topic = String("frame/") + String(frameId) + "/request/ota";
-    String payload = String("{\"hw_version\":\"") + HW_VERSION + "\"}";
+    String payload = String("{\"hw_version\":\"") + HW_VERSION + "\",\"current_version\":" + String(currentVersion) + "}";
     if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
         LOG("[OTA] Error publicando request MQTT");
         return;
@@ -108,7 +108,12 @@ void checkForUpdates()
                     if (Update.end())
                     {
                         LOG("[OTA] Update completed successfully, restarting...");
+                        currentVersion = latestVersion;
                         preferences.putInt("currentVersion", latestVersion);
+                        // Marcar la nueva version como "a prueba": se validara tras
+                        // arrancar estable, o se revertira si entra en boot-loop (setup()).
+                        preferences.putInt("pendingVer", latestVersion);
+                        preferences.putInt("bootCount", 0);
                         ESP.restart();
                     }
                     else

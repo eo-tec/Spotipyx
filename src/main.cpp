@@ -2,6 +2,8 @@
 #include "config.h"
 #include "ble_config.h"
 #include <ArduinoOTA.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 // Modules
 #include "schedule.h"
@@ -14,10 +16,22 @@
 #include "photos.h"
 #include "spotify.h"
 #include "mqtt_client.h"
+#include <esp_ota_ops.h>
+
+// Auto-rollback OTA
+#define OTA_MAX_BOOT_ATTEMPTS 3       // reinicios sin validar antes de revertir
+#define OTA_VALIDATE_AFTER_MS 60000UL // uptime estable (ms) para dar la version por buena
 
 void setup()
 {
+#ifdef HW_V2
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout (v2 PSU is marginal)
+#endif
     Serial.begin(115200);
+    delay(3000); // Wait for USB-CDC enumeration so early logs are visible
+
+    LOGF("Reset reason: %d", (int)esp_reset_reason());
+    Serial.flush();
 
     LOG("==========================================");
     #ifdef DEV_MODE
@@ -43,23 +57,88 @@ void setup()
 
     // Configuración del panel
     HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
+#ifdef HW_V2
+    mxconfig.gpio.r1 = R1_PIN;
+    mxconfig.gpio.g1 = G1_PIN;
+    mxconfig.gpio.b1 = B1_PIN;
+    mxconfig.gpio.r2 = R2_PIN;
+    mxconfig.gpio.g2 = G2_PIN;
+    mxconfig.gpio.b2 = B2_PIN;
+    mxconfig.gpio.a = A_PIN;
+    mxconfig.gpio.b = B_PIN;
+    mxconfig.gpio.c = C_PIN;
+    mxconfig.gpio.d = D_PIN;
     mxconfig.gpio.e = E_PIN;
+    mxconfig.gpio.clk = CLK_PIN;
+    mxconfig.gpio.lat = LAT_PIN;
+    mxconfig.gpio.oe = OE_PIN;
+#else
+    mxconfig.gpio.e = E_PIN;
+#endif
     mxconfig.clkphase = false;
+#ifdef HW_V2
+    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_8M; // lower speed for ESP32-S3
+    mxconfig.min_refresh_rate = 60;
+#else
     mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;
     mxconfig.min_refresh_rate = 200;
+#endif
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
-    dma_display->begin();
-    dma_display->setBrightness8(1);
-    dma_display->clearScreen();
-    dma_display->setRotation(135);
+
+    auto initPanel = [&]() {
+        LOG("HUB75 begin()...");
+        Serial.flush();
+        dma_display->begin();
+        dma_display->setBrightness8(1);
+        dma_display->clearScreen();
+        dma_display->setRotation(135);
+        LOG("HUB75 ready");
+        Serial.flush();
+    };
 
     // Inicializar Preferences para leer/guardar las credenciales
     preferences.begin("wifi", false);
+    LOG("Preferences begin ok");
+    Serial.flush();
     String storedSSID = preferences.getString("ssid", "");
     String storedPassword = preferences.getString("password", "");
     allowSpotify = preferences.getBool("allowSpotify", true);
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
+
+    // --- Auto-rollback OTA --------------------------------------------------
+    // Si venimos de instalar una version nueva (pendingVer>0) contamos arranques.
+    // Si entra en boot-loop (varios reinicios sin validar) volvemos al slot OTA
+    // anterior, que conserva la ultima version buena. La validacion (marcar la
+    // version como buena) se hace en loop() tras un arranque estable.
+    otaPendingVersion = preferences.getInt("pendingVer", 0);
+    {
+        int lastGoodVer = preferences.getInt("lastGoodVer", 0);
+        if (otaPendingVersion > 0) {
+            int bootCount = preferences.getInt("bootCount", 0) + 1;
+            preferences.putInt("bootCount", bootCount); // persistir YA, antes de nada que pueda crashear
+            LOGF("[Rollback] Version a prueba %d, arranque %d/%d", otaPendingVersion, bootCount, OTA_MAX_BOOT_ATTEMPTS);
+            if (bootCount > OTA_MAX_BOOT_ATTEMPTS && lastGoodVer > 0) {
+                const esp_partition_t *prev = esp_ota_get_next_update_partition(NULL);
+                if (prev && esp_ota_set_boot_partition(prev) == ESP_OK) {
+                    LOGF("[Rollback] Boot-loop detectado: revirtiendo de v%d a v%d", otaPendingVersion, lastGoodVer);
+                    currentVersion = lastGoodVer;
+                    preferences.putInt("currentVersion", lastGoodVer);
+                    preferences.putInt("pendingVer", 0);
+                    preferences.putInt("bootCount", 0);
+                    Serial.flush();
+                    ESP.restart();
+                } else {
+                    LOG("[Rollback] No se pudo cambiar la particion de arranque; continuando");
+                }
+            }
+        } else if (lastGoodVer < currentVersion) {
+            // Arranque normal: sembrar la ultima version buena conocida
+            preferences.putInt("lastGoodVer", currentVersion);
+        }
+    }
+    // ------------------------------------------------------------------------
+
     frameId = preferences.getInt("frameId", 0);
     if (frameId == 0) {
         // Backward compatibility: read old NVS key
@@ -84,8 +163,11 @@ void setup()
     if (storedSSID == "") {
         LOG("No WiFi credentials found. Starting BLE provisioning...");
 
-        // Iniciar servidor BLE
+        // Iniciar servidor BLE ANTES de HUB75 para evitar interrupt WDT
         setupBLE();
+
+        // Ahora sí, inicializar el panel
+        initPanel();
 
         // Mostrar mensaje de espera en pantalla
         dma_display->clearScreen();
@@ -103,7 +185,9 @@ void setup()
         LOG("WiFi conectado via BLE provisioning");
         showLoadingMsg("Connected!");
     } else {
-        // Hay credenciales guardadas, intentar conectar a WiFi
+        // Hay credenciales guardadas, inicializar panel y conectar a WiFi
+        initPanel();
+
         LOG("Conectando a WiFi...");
         WiFi.mode(WIFI_STA);
         WiFi.begin(storedSSID.c_str(), storedPassword.c_str());
@@ -398,18 +482,44 @@ void loop()
         }
     }
 
-    // Actualizar el scroll del título si es necesario (solo si no hay animación reproduciéndose)
-    if (!animPlaying) {
+    // Spinner de carga: mientras la animación se descarga mostramos el spinner en
+    // lugar del título; cuando termina (lista o abortada) pintamos el título real.
+    if (animSpinnerActive) {
+        if (animReady || currentAnimationId <= 0) {
+            animSpinnerActive = false;
+            showPhotoInfo(currentTitle, currentName); // ya sin spinner: dibuja el título
+        } else {
+            updateLoadingSpinner();
+        }
+    }
+
+    // Actualizar el scroll del título si es necesario (solo si no hay animación
+    // reproduciéndose ni el spinner de carga ocupando la zona del título)
+    if (!animPlaying && !animSpinnerActive) {
         updatePhotoInfo();
     }
 
     // Reproducir animación frame a frame
     updateAnimationPlayback();
 
+    // Reintentar frames perdidos durante la descarga pipelined
+    checkAnimationDownloadTimeout();
+
     // Actualizar reloj cada 60 segundos
     if (clockEnabled && millis() - lastClockUpdate >= 60000) {
         showClockOverlay();
         lastClockUpdate = millis();
+    }
+
+    // Validar la version a prueba tras un arranque estable (uptime suficiente sin
+    // reset/crash). Cancela el rollback: esta version pasa a ser la "ultima buena".
+    if (otaPendingVersion > 0 && millis() > OTA_VALIDATE_AFTER_MS) {
+        preferences.putInt("lastGoodVer", otaPendingVersion);
+        preferences.putInt("pendingVer", 0);
+        preferences.putInt("bootCount", 0);
+        esp_ota_mark_app_valid_cancel_rollback(); // inofensivo si el rollback de bootloader esta off
+        LOGF("[Rollback] Version %d validada como estable", otaPendingVersion);
+        otaPendingVersion = 0;
     }
 
     wait(animPlaying ? 5 : 100);

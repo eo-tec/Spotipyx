@@ -27,6 +27,7 @@ int wifiBrightness = 0;
 int maxIndex = 5;
 int maxPhotos = 5;
 int currentVersion = 0;
+int otaPendingVersion = 0;
 int frameId = 0;
 int photoIndex = 0;
 String mqttToken = "";
@@ -113,6 +114,14 @@ unsigned long animLastFrameTime = 0;
 unsigned long animLoopCount = 0;
 uint8_t animFrameStep = 1;
 unsigned long animFrameInterval = 200;
+uint32_t animFramesBitmap = 0;
+unsigned long animDownloadStartTime = 0;
+uint8_t animRetryCount = 0;
+
+// Loading spinner (shown instead of the title while an animation downloads)
+bool animSpinnerActive = false;
+unsigned long lastSpinnerUpdate = 0;
+uint8_t spinnerFrame = 0;
 
 // Waiting for owner mode
 bool waitingForOwner = false;

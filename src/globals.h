@@ -21,8 +21,27 @@
 // MQTT Client ID prefix
 #define MQTT_CLIENT_ID "frame-"
 
-// Pines del panel
-#define E_PIN 18
+// Pines del panel HUB75
+#ifdef HW_V2
+    // Hardware v2 (ESP32-S3-WROOM-1)
+    #define R1_PIN  4
+    #define G1_PIN  5
+    #define B1_PIN  6
+    #define R2_PIN  7
+    #define G2_PIN  15
+    #define B2_PIN  16
+    #define A_PIN   18
+    #define B_PIN   8
+    #define C_PIN   3
+    #define D_PIN   42
+    #define E_PIN   38
+    #define CLK_PIN 41
+    #define LAT_PIN 40
+    #define OE_PIN  2
+#else
+    // Hardware v1 (ESP32 clásico) - usa defaults de la librería
+    #define E_PIN 18
+#endif
 
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 64
@@ -76,6 +95,7 @@ extern int wifiBrightness;
 extern int maxIndex;
 extern int maxPhotos;
 extern int currentVersion;
+extern int otaPendingVersion; // versión OTA a prueba (sin validar); 0 = ninguna
 extern int frameId;
 extern int photoIndex;
 extern String mqttToken;
@@ -152,6 +172,14 @@ extern unsigned long animLastFrameTime;
 extern unsigned long animLoopCount;
 extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
 extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
+extern uint32_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
+extern unsigned long animDownloadStartTime; // millis() when first batch of requests was sent
+extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
+
+// Loading spinner: shown in place of the title while an animation is downloading
+extern bool animSpinnerActive;       // true while the spinner replaces the title
+extern unsigned long lastSpinnerUpdate; // millis() of last spinner frame advance
+extern uint8_t spinnerFrame;         // current spinner glyph index
 
 // Waiting for owner mode (BLE re-entry when no owner)
 extern bool waitingForOwner;
