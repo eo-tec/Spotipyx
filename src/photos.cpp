@@ -345,15 +345,19 @@ void showPhotoInfo(String title, String name)
                 titleScrollPauseStart = millis();
 
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
-                dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
-                dma_display->setCursor(1, titleY);
-                if (!loadingAnim) dma_display->print(title);
+                if (!loadingAnim) {
+                    dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
+                    dma_display->setCursor(1, titleY);
+                    dma_display->print(title);
+                }
             } else {
                 titleNeedsScroll = false;
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
-                dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
-                dma_display->setCursor(1, titleY);
-                if (!loadingAnim) dma_display->print(title);
+                if (!loadingAnim) {
+                    dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
+                    dma_display->setCursor(1, titleY);
+                    dma_display->print(title);
+                }
             }
         }
 
@@ -383,15 +387,19 @@ void showPhotoInfo(String title, String name)
                 titleScrollPauseStart = millis();
 
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
-                dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
-                dma_display->setCursor(1, titleY);
-                if (!loadingAnim) dma_display->print(title);
+                if (!loadingAnim) {
+                    dma_display->fillRect(0, titleY1 - 1, PANEL_RES_X, titleH + 2, myBLACK);
+                    dma_display->setCursor(1, titleY);
+                    dma_display->print(title);
+                }
             } else {
                 titleNeedsScroll = false;
                 dma_display->getTextBounds(title, 1, titleY, &titleX1, &titleY1, &titleW, &titleH);
-                dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
-                dma_display->setCursor(1, titleY);
-                if (!loadingAnim) dma_display->print(title);
+                if (!loadingAnim) {
+                    dma_display->fillRect(0, titleY1 - 1, titleW + 3, titleH + 2, myBLACK);
+                    dma_display->setCursor(1, titleY);
+                    dma_display->print(title);
+                }
             }
         }
 
@@ -415,28 +423,35 @@ void showPhotoInfo(String title, String name)
 }
 
 // Spinner de carga del tamaño de un carácter, dibujado donde iría el título.
-// Un punto gira en círculo (8 posiciones) con una pequeña estela para indicar
-// que la animación se está descargando.
+// Un punto gira por el perímetro (16 posiciones adyacentes, sin huecos) dejando
+// una estela en degradado, para indicar que la animación se está descargando.
 void drawLoadingSpinner() {
     const int cx = 3;             // centro del spinner (zona del título, izquierda)
-    const int cy = titleY - 3;
-    // 8 posiciones alrededor del centro, en sentido horario desde arriba
-    static const int8_t dx[8] = {  0,  2,  2,  2,  0, -2, -2, -2 };
-    static const int8_t dy[8] = { -2, -2,  0,  2,  2,  2,  0, -2 };
+    const int cy = titleY - 2;    // bajado 1px para centrarlo en la fila del título
+    // 16 posiciones del perímetro de un cuadrado 5x5 (radio 2), en sentido horario
+    static const int8_t dx[16] = {  0,  1,  2,  2,  2,  2,  2,  1,  0, -1, -2, -2, -2, -2, -2, -1 };
+    static const int8_t dy[16] = { -2, -2, -2, -1,  0,  1,  2,  2,  2,  2,  2,  1,  0, -1, -2, -2 };
 
-    // Caja fija de un carácter en la esquina inferior izquierda
-    dma_display->fillRect(0, titleY - 6, 7, 8, myBLACK);
+    // Caja del ancho de un carácter, con la MISMA altura/posición que la fila del
+    // título (misma fórmula que showPhotoInfo) para que coincidan exactamente.
+    dma_display->setFont(&Picopixel);
+    int16_t bx, by; uint16_t bw, bh;
+    dma_display->getTextBounds(currentTitle.length() ? currentTitle : String("X"), 1, titleY, &bx, &by, &bw, &bh);
+    dma_display->fillRect(0, by - 1, 7, bh + 2, myBLACK);
 
-    uint8_t i = spinnerFrame & 0x07;
-    uint8_t prev = (i + 7) & 0x07; // posición anterior (estela)
-    uint16_t gray = dma_display->color565(70, 70, 70);
-    dma_display->drawPixel(cx + dx[prev], cy + dy[prev], gray);
-    dma_display->drawPixel(cx + dx[i], cy + dy[i], myWHITE);
+    const uint8_t N = 16;
+    const uint8_t TRAIL = 8;                       // cabeza + 7 de estela (≈ medio anillo)
+    uint8_t head = spinnerFrame % N;
+    for (uint8_t t = 0; t < TRAIL; t++) {
+        uint8_t idx = (head + N - t) % N;          // t posiciones por detrás de la cabeza
+        int v = 255 - (int)t * 230 / (TRAIL - 1);  // brillo de 255 (cabeza) a 25 (cola)
+        dma_display->drawPixel(cx + dx[idx], cy + dy[idx], dma_display->color565(v, v, v));
+    }
 }
 
 // Avanza el spinner periódicamente mientras la animación se descarga.
 void updateLoadingSpinner() {
-    const unsigned long SPINNER_INTERVAL = 90; // ms entre pasos (8 pasos ≈ 0,7s/vuelta)
+    const unsigned long SPINNER_INTERVAL = 30; // ms entre pasos (16 pasos ≈ 0,5s/vuelta)
     if (millis() - lastSpinnerUpdate < SPINNER_INTERVAL) return;
     spinnerFrame++;
     lastSpinnerUpdate = millis();

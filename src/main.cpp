@@ -440,8 +440,10 @@ void loop()
     // Si estamos conectados a WiFi, se ejecuta la lógica original:
     if (allowSpotify) {
         // Solo llamar a fetchSongId si el scroll no está activo (evita bloquear el scroll)
+        // y si NO estamos cargando una animación (fetchSongId bloquea el hilo hasta 5s
+        // esperando respuesta y congelaría el spinner de carga).
         bool scrollActive = titleNeedsScroll && (titleScrollState == SCROLL_SCROLLING || titleScrollState == SCROLL_RETURNING);
-        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive) {
+        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive && !animSpinnerActive) {
             songOnline = fetchSongId();
             lastSpotifyCheck = millis();
         }
@@ -522,5 +524,6 @@ void loop()
         otaPendingVersion = 0;
     }
 
-    wait(animPlaying ? 5 : 100);
+    // Durante el spinner de carga iteramos rápido para que la animación sea fluida
+    wait(animPlaying ? 5 : (animSpinnerActive ? 15 : 100));
 }
