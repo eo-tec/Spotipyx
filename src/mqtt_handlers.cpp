@@ -264,11 +264,24 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
         return;
     }
 
+    // Map backend frame index to its slot in animBuffer.
+    // With step>1 we only requested every Nth backend frame, so slot = frameIndex / step.
+    uint8_t slot = animFrameStep > 0 ? frameIndex / animFrameStep : 0;
+    if (slot >= animFrameCount) {
+        LOGF("[MQTT:anim] Slot %d out of range (frameCount=%d, step=%d)", slot, animFrameCount, animFrameStep);
+        return;
+    }
+
+    // Drop duplicates: bit already set means we already stored this slot
+    if (animFramesBitmap & (1UL << slot)) {
+        LOGF("[MQTT:anim] Duplicate frame %d (slot %d), ignoring", frameIndex, slot);
+        return;
+    }
+
     uint8_t* src = payload + 4; // 64x64 RGB565 from backend
-    uint8_t* dst = animBuffer + animFramesReceived * animFrameSize; // store sequentially
+    uint8_t* dst = animBuffer + slot * animFrameSize;
 
     if (animFrameWidth == 64) {
-        // Full res: direct copy
         memcpy(dst, src, ANIM_FRAME_SIZE_64);
     } else {
         // Downscale 64x64 → 32x32: pick top-left pixel of each 2x2 block
@@ -282,8 +295,9 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
         }
     }
 
+    animFramesBitmap |= (1UL << slot);
     animFramesReceived++;
-    LOGF("[MQTT:anim] Frame %d/%d received (%d/%d stored, %dx%d)", frameIndex, totalFrames, animFramesReceived, animFrameCount, animFrameWidth, animFrameWidth);
+    LOGF("[MQTT:anim] Frame %d->slot %d received (%d/%d stored)", frameIndex, slot, animFramesReceived, animFrameCount);
 
     if (animFramesReceived >= animFrameCount) {
         animReady = true;
@@ -291,20 +305,6 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
         animCurrentFrame = 0;
         animLastFrameTime = millis();
         LOG("[MQTT:anim] All frames received, starting playback");
-    } else {
-        // Request next frame (skip by step to cover full duration)
-        int nextBackendFrame = animFramesReceived * animFrameStep;
-        if (nextBackendFrame < totalFrames) {
-            requestAnimationFrame(currentAnimationId, nextBackendFrame);
-        } else {
-            // Edge case: reached end of backend frames
-            animFrameCount = animFramesReceived;
-            animReady = true;
-            animPlaying = true;
-            animCurrentFrame = 0;
-            animLastFrameTime = millis();
-            LOG("[MQTT:anim] All available frames received, starting playback");
-        }
     }
 }
 

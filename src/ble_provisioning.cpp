@@ -83,11 +83,22 @@ void sendBLEResponse(bool success, String frameToken, String error) {
 
 void setupBLE() {
     LOG("[BLE] Inicializando servidor BLE...");
+    Serial.flush();
 
     NimBLEDevice::init(BLE_DEVICE_NAME);
+    LOG("[BLE] NimBLEDevice::init done");
+    Serial.flush();
+#ifdef HW_V2
+    NimBLEDevice::setPower(ESP_PWR_LVL_N12); // lowest TX power on v2 to reduce current
+#else
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+#endif
+    LOG("[BLE] setPower done");
+    Serial.flush();
 
     pBLEServer = NimBLEDevice::createServer();
+    LOG("[BLE] createServer done");
+    Serial.flush();
     pBLEServer->setCallbacks(new FrameBLEServerCallbacks());
 
     // Crear servicio con el UUID que espera la app
