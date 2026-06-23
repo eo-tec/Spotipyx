@@ -113,6 +113,7 @@ extern ScrollState titleScrollState;
 extern bool titleNeedsScroll;
 extern int titleY;
 extern int nameY;
+extern int nameX;
 
 // Photo loading
 extern volatile bool isLoadingPhoto;

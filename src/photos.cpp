@@ -29,12 +29,14 @@ void buildOverlayMask() {
         markOverlayRegion(0, y1 - 1, rectW, h + 2);
     }
 
-    // Author name region
+    // Author name region — use the actual drawn position (nameX/nameY) set by
+    // showPhotoInfo. The name is right-aligned on the bottom row when it shares a
+    // line with the title, but left-aligned (x=1) on its own row when the title is
+    // long and wraps to two lines. Recomputing a right-aligned position here would
+    // mask the wrong pixels and let the animation overwrite the username.
     if (currentName.length() > 0) {
         int16_t x1, y1;
         uint16_t w, h;
-        dma_display->getTextBounds(currentName, 0, 0, &x1, &y1, &w, &h);
-        int nameX = PANEL_RES_X - w;
         dma_display->getTextBounds(currentName, nameX, nameY, &x1, &y1, &w, &h);
         markOverlayRegion(nameX - 1, y1 - 1, w + 2, h + 2);
     }
@@ -353,7 +355,7 @@ void showPhotoInfo(String title, String name)
         }
 
         if (name.length() > 0) {
-            int nameX = PANEL_RES_X - nameW;
+            nameX = PANEL_RES_X - nameW;
             dma_display->getTextBounds(name, nameX, nameY, &nameX1, &nameY1, &nameW, &nameH);
             dma_display->fillRect(nameX - 1, nameY1 - 1, nameW + 2, nameH + 2, myBLACK);
             dma_display->setCursor(nameX, nameY);
@@ -391,9 +393,10 @@ void showPhotoInfo(String title, String name)
         }
 
         if (name.length() > 0) {
-            dma_display->getTextBounds(name, 1, nameY, &nameX1, &nameY1, &nameW, &nameH);
+            nameX = 1;
+            dma_display->getTextBounds(name, nameX, nameY, &nameX1, &nameY1, &nameW, &nameH);
             dma_display->fillRect(0, nameY1 - 1, nameW + 3, nameH + 2, myBLACK);
-            dma_display->setCursor(1, nameY);
+            dma_display->setCursor(nameX, nameY);
             dma_display->print(name);
         }
     }
