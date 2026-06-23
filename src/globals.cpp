@@ -64,6 +64,7 @@ ScrollState titleScrollState = SCROLL_PAUSED_START;
 bool titleNeedsScroll = false;
 int titleY = 0;
 int nameY = 0;
+int nameX = 0;
 
 // Photo loading
 volatile bool isLoadingPhoto = false;
