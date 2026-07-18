@@ -85,7 +85,14 @@ void setupBLE() {
     LOG("[BLE] Inicializando servidor BLE...");
     Serial.flush();
 
-    NimBLEDevice::init(BLE_DEVICE_NAME);
+    // Nombre con MAC para que la app identifique el frame en el scan sin conectar.
+    // Formato: frame.AABBCCDDEEFF (MAC WiFi STA sin dos puntos).
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    mac.toUpperCase();
+    String bleName = String(BLE_DEVICE_NAME_PREFIX) + mac;
+
+    NimBLEDevice::init(bleName.c_str());
     LOG("[BLE] NimBLEDevice::init done");
     Serial.flush();
 #ifdef HW_V2
@@ -121,13 +128,13 @@ void setupBLE() {
 
     pService->start();
 
-    // Configurar advertising
+    // Configurar advertising (el nombre ya se fijó en NimBLEDevice::init)
     NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
     pAdvertising->start();
 
-    LOGF("[BLE] Servidor BLE iniciado - Device name: %s", BLE_DEVICE_NAME);
+    LOGF("[BLE] Servidor BLE iniciado - Device name: %s", bleName.c_str());
     LOG("[BLE] Esperando conexión de la app...");
 }
 

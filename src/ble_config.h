@@ -2,7 +2,8 @@
 #define BLE_CONFIG_H
 
 // UUIDs coordinados con la app React Native (frame-app/src/config/bluetooth.ts)
-#define BLE_DEVICE_NAME "frame."
+// Nombre BLE real = prefijo + MAC sin ":" (ej. "frame.781C3CA5B4C5") — ver setupBLE()
+#define BLE_DEVICE_NAME_PREFIX "frame."
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define WIFI_CREDENTIALS_CHAR_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define RESPONSE_CHAR_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"
