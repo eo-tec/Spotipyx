@@ -47,6 +47,102 @@ class WifiCredentialsCallback : public NimBLECharacteristicCallbacks {
     }
 };
 
+// Callback para peticiones de scan de redes WiFi.
+// Solo levanta un flag: escanear aquí bloquearía la tarea del stack BLE.
+class NetworksCallback : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (String(value.c_str()) == "SCAN") {
+            LOG("[BLE] Scan de redes solicitado por la app");
+            bleNetworkScanRequested = true;
+        }
+    }
+};
+
+static void publishNetworksState(const String& json) {
+    if (pNetworksChar == nullptr) return;
+    pNetworksChar->setValue(std::string(json.c_str()));
+    pNetworksChar->notify();
+}
+
+// Máquina de estados no bloqueante del scan de redes. Se llama desde los bucles
+// donde el BLE está activo. El scan es asíncrono para no cortar la conexión BLE.
+void processBLENetworkScan() {
+    if (pNetworksChar == nullptr) return;
+
+    static bool scanInFlight = false;
+
+    if (bleNetworkScanRequested && !scanInFlight) {
+        bleNetworkScanRequested = false;
+        scanInFlight = true;
+        publishNetworksState("{\"state\":\"scanning\"}");
+        // No tocar el modo si ya hay WiFi conectado (caso wifiOnly): scanNetworks
+        // funciona igual y evitamos tirar la conexión.
+        if (WiFi.status() != WL_CONNECTED) {
+            WiFi.mode(WIFI_STA);
+        }
+        WiFi.scanNetworks(true, false); // async, sin ocultas
+        LOG("[BLE] Scan WiFi lanzado");
+        return;
+    }
+
+    if (!scanInFlight) return;
+
+    int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+
+    scanInFlight = false;
+
+    if (n < 0) {
+        LOG("[BLE] Scan WiFi fallido");
+        publishNetworksState("{\"state\":\"error\"}");
+        WiFi.scanDelete();
+        return;
+    }
+
+    // Los resultados vienen ordenados por RSSI: al deduplicar por SSID nos
+    // quedamos con la primera aparición, que es la de mejor señal.
+    String json = "{\"state\":\"done\",\"networks\":[";
+    int included = 0;
+    for (int i = 0; i < n && included < BLE_SCAN_MAX_NETWORKS; i++) {
+        String ssid = WiFi.SSID(i);
+        if (ssid.length() == 0) continue; // red oculta
+
+        bool duplicate = false;
+        for (int j = 0; j < i; j++) {
+            if (WiFi.SSID(j) == ssid) { duplicate = true; break; }
+        }
+        if (duplicate) continue;
+
+        // Escapar comillas y barras para no romper el JSON
+        String safeSsid;
+        for (unsigned int c = 0; c < ssid.length(); c++) {
+            char ch = ssid.charAt(c);
+            if (ch == '"' || ch == '\\') safeSsid += '\\';
+            safeSsid += ch;
+        }
+
+        String entry = String(included > 0 ? "," : "") + "{\"s\":\"" + safeSsid +
+                       "\",\"r\":" + String(WiFi.RSSI(i)) +
+                       ",\"e\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? 1 : 0) + "}";
+
+        // Cortar antes de pasarnos del tamaño que cabe en una lectura BLE
+        if (json.length() + entry.length() + 2 > BLE_SCAN_MAX_PAYLOAD) {
+            LOGF("[BLE] Lista truncada en %d redes por tamaño", included);
+            break;
+        }
+
+        json += entry;
+        included++;
+    }
+    json += "]}";
+
+    WiFi.scanDelete();
+    LOGF("[BLE] Scan completado: %d redes encontradas, %d enviadas (%d bytes)",
+         n, included, json.length());
+    publishNetworksState(json);
+}
+
 void sendBLEResponse(bool success, String frameToken, String error) {
     if (pResponseChar == nullptr) {
         LOG("[BLE] Error: característica de respuesta no inicializada");
@@ -125,6 +221,16 @@ void setupBLE() {
     );
     // Inicializar con valor vacío para evitar basura
     pResponseChar->setValue("");
+
+    // Característica de redes WiFi cercanas (Write "SCAN" + Read + Notify).
+    // Los firmwares antiguos no la tienen: la app lo detecta y cae al modo manual.
+    pNetworksChar = pService->createCharacteristic(
+        NETWORKS_CHAR_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
+    );
+    pNetworksChar->setCallbacks(new NetworksCallback());
+    pNetworksChar->setValue("{\"state\":\"idle\"}");
+    bleNetworkScanRequested = false;
 
     pService->start();
 

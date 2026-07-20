@@ -188,6 +188,8 @@ extern bool waitingForOwner;
 extern NimBLEServer* pBLEServer;
 extern NimBLECharacteristic* pWifiCredentialsChar;
 extern NimBLECharacteristic* pResponseChar;
+extern NimBLECharacteristic* pNetworksChar;
+extern bool bleNetworkScanRequested;
 extern bool bleDeviceConnected;
 extern bool bleCredentialsReceived;
 extern String bleReceivedSSID;

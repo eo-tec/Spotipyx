@@ -178,6 +178,7 @@ void setup()
         // Esperar credenciales via BLE
         while (!processBLECredentials()) {
             esp_task_wdt_reset();
+            processBLENetworkScan();
             delay(100);
         }
 
@@ -221,6 +222,8 @@ void setup()
                 if (processBLECredentialsNonBlocking()) {
                     break;
                 }
+
+                processBLENetworkScan();
 
                 // Intentar WiFi con credenciales existentes cada 3 minutos
                 if (storedSSID != "" && millis() - lastWiFiAttempt >= WIFI_RETRY_INTERVAL) {
@@ -407,6 +410,7 @@ void loop()
         if (bleCredentialsReceived && WiFi.status() == WL_CONNECTED) {
             processBLECredentialsAlreadyConnected();
         }
+        processBLENetworkScan();
         ArduinoOTA.handle();
         delay(100);
         return;

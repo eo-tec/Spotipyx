@@ -5,6 +5,7 @@
 
 void sendBLEResponse(bool success, String frameToken = "", String error = "");
 void setupBLE();
+void processBLENetworkScan();
 bool processBLECredentials();
 bool processBLECredentialsNonBlocking();
 void enterWaitingForOwnerMode();
