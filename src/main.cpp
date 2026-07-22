@@ -77,8 +77,13 @@ void setup()
 #endif
     mxconfig.clkphase = false;
 #ifdef HW_V2
-    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_8M; // lower speed for ESP32-S3
-    mxconfig.min_refresh_rate = 60;
+    // Medido en v2: a 20 MHz el driver alcanza 137 Hz usando lsbMsbTransitionBit=1,
+    // frente a los 100 Hz con bit=2 de la config anterior (8 MHz / 60). Mejora a la
+    // vez el refresco (menos parpadeo en camara) y la profundidad de color
+    // percibida (menos banding en fotos), porque cada bit de transicion que se
+    // ahorra es gradacion que se conserva.
+    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;
+    mxconfig.min_refresh_rate = 120;
 #else
     mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;
     mxconfig.min_refresh_rate = 200;
