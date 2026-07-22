@@ -267,6 +267,12 @@ void setup()
     mqttClient.setCallback(mqttCallback);
     mqttClient.setKeepAlive(60);
     mqttClient.setBufferSize(13000); // fits photo response (~12.5KB) and anim frames (8.2KB)
+    // PubSubClient espera bloqueando DENTRO de loop() a que llegue el resto de un
+    // paquete fragmentado por TCP. Con el default de 15 s, una rafaga de comandos
+    // de dibujo congelaba el loop entero varios segundos y se perdian hasta el
+    // 65% de los mensajes (medido: bloqueo maximo de 15,01 s, exactamente el
+    // default). Con 2 s se reciben el 100%.
+    mqttClient.setSocketTimeout(2);
 
     // Configuración de OTA
     ArduinoOTA.setHostname(("Frame-" + String(frameId)).c_str());
