@@ -154,7 +154,7 @@ bool overlayMaskGet(int x, int y);
 void overlayMaskClear();
 
 // Animation playback
-#define MAX_ANIM_FRAMES 20
+#define MAX_ANIM_FRAMES 60
 #define ANIM_FRAME_SIZE_64 (64 * 64 * 2) // 8192 bytes RGB565
 #define ANIM_FRAME_SIZE_32 (32 * 32 * 2) // 2048 bytes RGB565
 extern bool hasPsram;
@@ -172,7 +172,7 @@ extern unsigned long animLastFrameTime;
 extern unsigned long animLoopCount;
 extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
 extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
-extern uint32_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
+extern uint64_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
 extern unsigned long animDownloadStartTime; // millis() when first batch of requests was sent
 extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
 

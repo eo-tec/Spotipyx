@@ -114,7 +114,7 @@ unsigned long animLastFrameTime = 0;
 unsigned long animLoopCount = 0;
 uint8_t animFrameStep = 1;
 unsigned long animFrameInterval = 200;
-uint32_t animFramesBitmap = 0;
+uint64_t animFramesBitmap = 0;
 unsigned long animDownloadStartTime = 0;
 uint8_t animRetryCount = 0;
 

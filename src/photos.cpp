@@ -610,7 +610,7 @@ void checkAnimationDownloadTimeout() {
     if (animReady || currentAnimationId <= 0 || animBuffer == nullptr) return;
     if (animDownloadStartTime == 0) return;
 
-    const unsigned long ANIM_DOWNLOAD_TIMEOUT_MS = 5000;
+    const unsigned long ANIM_DOWNLOAD_TIMEOUT_MS = 15000;
     const uint8_t ANIM_MAX_RETRIES = 3;
 
     if (millis() - animDownloadStartTime < ANIM_DOWNLOAD_TIMEOUT_MS) return;
@@ -626,7 +626,7 @@ void checkAnimationDownloadTimeout() {
 
     uint8_t missing = 0;
     for (uint8_t slot = 0; slot < animFrameCount; slot++) {
-        if (!(animFramesBitmap & (1UL << slot))) {
+        if (!(animFramesBitmap & (1ULL << slot))) {
             requestAnimationFrame(currentAnimationId, slot * animFrameStep);
             mqttClient.loop();
             missing++;
