@@ -110,12 +110,13 @@ void showPhoto(int index)
         esp_task_wdt_reset();
         LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         if (currentAnimationId > 0) {
-            // Animacion: la foto anterior sigue en pantalla hasta que la descarga
-            // termine (el loop principal hace el cambio via startAnimationPlaybackIfReady)
+            // Animacion: lo que haya en pantalla (foto o video en curso) sigue
+            // hasta que la descarga termine (el swap lo hace startAnimationPlaybackIfReady)
             startAnimationDownloadIfNeeded();
         }
         if (currentAnimationId <= 0) { // foto normal, o sin memoria para animar
-            displayPhotoWithFade();
+            if (animPlaying) photoPending = true; // prefetch: se pinta al acabar el video
+            else displayPhotoWithFade();
         }
     } else {
         LOG("[Photo] Error recibiendo foto via MQTT");
@@ -156,7 +157,8 @@ void showPhotoById(int id)
             startAnimationDownloadIfNeeded();
         }
         if (currentAnimationId <= 0) {
-            displayPhotoWithFade();
+            if (animPlaying) photoPending = true;
+            else displayPhotoWithFade();
         }
     } else {
         LOG("[Photo] Error recibiendo foto via MQTT");
@@ -298,6 +300,9 @@ void onReceiveNewPic(int id)
 
     photoIndex = 1;
 
+    // Un push del usuario interrumpe cualquier video en curso o descarga pendiente
+    stopAnimation();
+
     // Mostrar la foto con animación desde el centro via MQTT
     showPhotoFromCenterById(id);
     lastPhotoChange = millis();
@@ -330,8 +335,10 @@ void showPhotoInfo(String title, String name)
     currentTitle = title;
     currentName = name;
 
-    // Margen entre textos cuando están en la misma línea
-    const int horizontalMargin = 4;
+    // Margen entre textos cuando están en la misma línea. Con 4, las cajas negras
+    // de titulo y autor podian quedar a ras (0px de foto entre medias); con 5
+    // siempre queda al menos 1px de hueco.
+    const int horizontalMargin = 5;
 
     // Decidir el layout basado en los anchos reales
     bool sameLine = false;
@@ -478,20 +485,37 @@ void startAnimationDownloadIfNeeded() {
         for (uint8_t slot = 0; slot < animFrameCount; slot++) {
             requestAnimationFrame(currentAnimationId, slot * animFrameStep);
             mqttClient.loop(); // flush TX and drain any responses already arriving
+            updateAnimationPlayback(); // no congelar un video en curso (prefetch)
         }
         animDownloadStartTime = millis();
     }
 }
 
-// La descarga termino: sustituye la foto anterior (que siguio en pantalla todo
-// este tiempo) por el primer frame + titulo de la animacion y arranca el playback.
-// Llamada desde el loop principal.
+// La descarga termino: sustituye lo que haya en pantalla (foto anterior o video
+// que acaba sus vueltas) por el primer frame + titulo de la animacion y arranca
+// el playback. El buffer de descarga pasa a ser el de reproduccion, dejando la
+// maquinaria de descarga libre para el prefetch del siguiente. Llamada desde el
+// loop principal.
 void startAnimationPlaybackIfReady() {
-    if (!animReady || animPlaying || currentAnimationId <= 0) return;
+    if (!animReady || currentAnimationId <= 0 || !animBuffer) return;
+    // Si hay un video reproduciendose, dejarle terminar sus vueltas antes del swap
+    if (animPlaying && animLoopCount < playMaxLoops) return;
+
+    if (playBuffer) free(playBuffer);
+    playBuffer = animBuffer;
+    animBuffer = nullptr;
+    playFrameCount = animFrameCount;
+    playFrameInterval = animFrameInterval;
+    unsigned long loopMs = (unsigned long)playFrameCount * playFrameInterval;
+    playMaxLoops = loopMs > 0 ? max(3UL, (unsigned long)secsPhotos / loopMs) : 3UL;
+
+    animPlaying = false;
+    resetAnimationDownloadState(false);
 
     displayPhotoWithFade();
     buildOverlayMask(); // tras pintar el titulo, para que el layout sea el definitivo
     animCurrentFrame = 0;
+    animLoopCount = 0;
     animLastFrameTime = millis();
     animPlaying = true;
     lastPhotoChange = millis(); // el intervalo de foto empieza cuando la animacion se ve
@@ -499,7 +523,7 @@ void startAnimationPlaybackIfReady() {
 }
 
 void drawAnimationFrame(uint8_t frameIndex) {
-    uint8_t* frame = animBuffer + frameIndex * animFrameSize;
+    uint8_t* frame = playBuffer + frameIndex * animFrameSize;
 
     if (animFrameWidth == 64) {
         for (int y = 0; y < 64; y++) {
@@ -527,50 +551,101 @@ void drawAnimationFrame(uint8_t frameIndex) {
 }
 
 void updateAnimationPlayback() {
-    if (!animPlaying || !animReady || animFrameCount == 0 || !animBuffer) return;
+    if (!animPlaying || playFrameCount == 0 || !playBuffer) return;
 
     unsigned long now = millis();
+    if (now - animLastFrameTime < playFrameInterval) return;
 
-    if (now - animLastFrameTime >= animFrameInterval) {
-        drawAnimationFrame(animCurrentFrame);
+    // Catch-up: si el loop va lento (p.ej. recibiendo frames de una descarga en
+    // paralelo, ~130ms por mensaje), saltamos los fotogramas atrasados para
+    // mantener la velocidad real del video en vez de reproducir a camara lenta.
+    uint16_t steps = (now - animLastFrameTime) / playFrameInterval;
+    for (uint16_t i = 1; i < steps; i++) {
         animCurrentFrame++;
-        if (animCurrentFrame >= animFrameCount) {
+        if (animCurrentFrame >= playFrameCount) {
             animCurrentFrame = 0;
             animLoopCount++;
         }
-        animLastFrameTime = now;
+    }
 
-        // Stop after N loops — show animation for ~secsPhotos duration
-        unsigned long animDuration = (unsigned long)animFrameCount * 1000 / animFps; // one loop ms
-        unsigned long maxLoops = max(3UL, secsPhotos / animDuration);
-        if (animLoopCount >= maxLoops) {
+    drawAnimationFrame(animCurrentFrame);
+    animCurrentFrame++;
+    if (animCurrentFrame >= playFrameCount) {
+        animCurrentFrame = 0;
+        animLoopCount++;
+    }
+    animLastFrameTime += (unsigned long)steps * playFrameInterval; // conserva la fase
+
+    if (animLoopCount >= playMaxLoops) {
+        // Si el siguiente video se esta descargando (o ya esta listo), seguimos en
+        // bucle hasta que startAnimationPlaybackIfReady haga el swap.
+        if (currentAnimationId > 0) return;
+
+        if (photoPending) {
+            // Prefetch devolvio una foto estatica: ahora es su turno
+            stopPlayback();
+            photoPending = false;
+            displayPhotoWithFade();
+            lastPhotoChange = millis();
+        } else {
             LOG("[Anim] Playback finished (loop limit reached)");
-            stopAnimation();
+            stopPlayback();
             // No reseteamos lastPhotoChange: la reproduccion ya consumio el intervalo
-            // (maxLoops esta calculado para durar ~secsPhotos), asi que la siguiente
-            // foto sale enseguida en vez de dejar el ultimo frame congelado.
+            // (playMaxLoops esta calculado para durar ~secsPhotos), asi que la
+            // siguiente foto sale enseguida en vez de dejar el ultimo frame congelado.
         }
     }
 }
 
-void stopAnimation() {
+// El prefetch se dispara cuando al video actual le quedan <= ANIM_PREFETCH_MS de
+// reproduccion. Solo en v2 (PSRAM): sin PSRAM no hay RAM para dos buffers.
+bool animPrefetchDue() {
+    if (!animPlaying || !hasPsram || photoPending || currentAnimationId > 0) return false;
+    const unsigned long ANIM_PREFETCH_MS = 15000;
+    unsigned long loopMs = (unsigned long)playFrameCount * playFrameInterval;
+    if (loopMs == 0) return true;
+    unsigned long total = playMaxLoops * loopMs;
+    unsigned long played = animLoopCount * loopMs; // aprox: ignora el frame actual
+    unsigned long remaining = total > played ? total - played : 0;
+    return remaining <= ANIM_PREFETCH_MS;
+}
+
+// Para la reproduccion y libera su buffer. No toca el estado de descarga.
+void stopPlayback() {
     animPlaying = false;
-    animReady = false;
+    animCurrentFrame = 0;
+    animLoopCount = 0;
+    playFrameCount = 0;
+    overlayMaskClear();
+    if (playBuffer) {
+        free(playBuffer);
+        playBuffer = nullptr;
+        LOGF("[Anim] Play buffer freed (free heap: %d)", ESP.getFreeHeap());
+    }
+}
+
+// Resetea el estado de descarga (y opcionalmente libera su buffer). No toca la
+// reproduccion en curso.
+void resetAnimationDownloadState(bool freeBuffer) {
     currentAnimationId = -1;
+    animReady = false;
     animFrameCount = 0;
     animFramesReceived = 0;
     animFramesBitmap = 0;
-    animLoopCount = 0;
     animFrameStep = 1;
     animFrameInterval = 200;
     animRetryCount = 0;
     animDownloadStartTime = 0;
-    overlayMaskClear();
-    if (animBuffer) {
+    if (freeBuffer && animBuffer) {
         free(animBuffer);
         animBuffer = nullptr;
-        LOGF("[Anim] Buffer freed (free heap: %d)", ESP.getFreeHeap());
     }
+}
+
+void stopAnimation() {
+    stopPlayback();
+    resetAnimationDownloadState(true);
+    photoPending = false;
 }
 
 // Re-requests any frames still missing after a stall window (no frame received
@@ -588,10 +663,16 @@ void checkAnimationDownloadTimeout() {
     if (animRetryCount >= ANIM_MAX_RETRIES) {
         LOGF("[Anim] Giving up after %d retries (%d/%d frames)",
              animRetryCount, animFramesReceived, animFrameCount);
-        stopAnimation();
-        // La foto nueva nunca llego a pintarse (seguia la anterior en pantalla):
-        // mostramos su primer frame como foto estatica
-        displayPhotoWithFade();
+        if (animPlaying) {
+            // Prefetch fallido: el video actual sigue; al terminar sus vueltas el
+            // loop principal pedira otra foto por el camino normal
+            resetAnimationDownloadState(true);
+        } else {
+            stopAnimation();
+            // La foto nueva nunca llego a pintarse (seguia la anterior en pantalla):
+            // mostramos su primer frame como foto estatica
+            displayPhotoWithFade();
+        }
         return;
     }
 

@@ -469,16 +469,18 @@ void loop()
                 songShowing = "";
                 lastPhotoChange = 0;
             }
-            // Don't change photo while animation is downloading or playing
-            bool animBusy = (currentAnimationId > 0) || animPlaying;
-            if (!animBusy && millis() - lastPhotoChange >= secsPhotos) {
+            // Cambio normal cuando no hay video; prefetch de la siguiente cuando
+            // al video actual le queda poco (la descarga corre en paralelo)
+            bool downloadBusy = (currentAnimationId > 0);
+            bool changeDue = !animPlaying && millis() - lastPhotoChange >= secsPhotos;
+            if (!downloadBusy && !photoPending && (changeDue || animPrefetchDue())) {
                 if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
                 LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
                 showPhotoIndex(photoIndex);
                 photoIndex++;
-                lastPhotoChange = millis();
+                if (changeDue) lastPhotoChange = millis();
             }
         } else {
             if (songShowing != songOnline) {
@@ -488,15 +490,16 @@ void loop()
             }
         }
     } else {
-        bool animBusy = (currentAnimationId > 0) || animPlaying;
-        if (!animBusy && millis() - lastPhotoChange >= secsPhotos) {
+        bool downloadBusy = (currentAnimationId > 0);
+        bool changeDue = !animPlaying && millis() - lastPhotoChange >= secsPhotos;
+        if (!downloadBusy && !photoPending && (changeDue || animPrefetchDue())) {
             if (photoIndex >= maxPhotos) {
                 photoIndex = 0;
             }
             LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
             showPhotoIndex(photoIndex);
             photoIndex++;
-            lastPhotoChange = millis();
+            if (changeDue) lastPhotoChange = millis();
         }
     }
 

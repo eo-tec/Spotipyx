@@ -18,6 +18,9 @@ void startAnimationDownloadIfNeeded();
 void startAnimationPlaybackIfReady();
 void updateAnimationPlayback();
 void checkAnimationDownloadTimeout();
+bool animPrefetchDue();
+void stopPlayback();
+void resetAnimationDownloadState(bool freeBuffer);
 void stopAnimation();
 
 #endif

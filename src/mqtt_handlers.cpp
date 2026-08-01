@@ -1,6 +1,7 @@
 #include "mqtt_handlers.h"
 #include "config.h"
 #include "ble_provisioning.h"
+#include "photos.h"
 
 // Forward declaration (defined in mqtt_client.cpp)
 void mqttCallback(char *topic, byte *payload, unsigned int length);
@@ -14,6 +15,7 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
     while ((millis() - start) < timeout) {
         esp_task_wdt_reset();
         mqttClient.loop();
+        updateAnimationPlayback(); // no congelar un video en curso durante la espera
         yield();
         delay(10);
 
@@ -125,21 +127,20 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
         memcpy(photoBuffer, payload + jsonEnd + 1, 12288);
         mqttResponseSuccess = true;
 
-        // Check if this is an animation (new firmware detects extra fields)
+        // Check if this is an animation (new firmware detects extra fields).
+        // Solo se toca el estado de DESCARGA: un video reproduciendose sigue
+        // intacto (es el caso del prefetch del siguiente).
         if (doc.containsKey("animation") && doc["animation"].as<bool>()) {
             currentAnimationId = doc["animationId"] | -1;
             animFrameCount = doc["totalFrames"] | 0;
             animFps = doc["fps"] | 10;
             animFramesReceived = 0;
             animReady = false;
-            animPlaying = false;
-            animCurrentFrame = 0;
             LOGF("[MQTT] Animation detected: id=%d, frames=%d, fps=%d", currentAnimationId, animFrameCount, animFps);
         } else {
-            // Regular photo: stop any playing animation
-            animPlaying = false;
-            animReady = false;
-            currentAnimationId = -1;
+            // Foto normal: cancelar cualquier descarga pendiente (la reproduccion
+            // en curso no se toca; la foto quedara como photoPending si hace falta)
+            resetAnimationDownloadState(true);
         }
 
         LOGF("[MQTT] Photo received (reqId=%d): %s by %s", mqttRequestId, photoTitle, photoAuthor);
@@ -258,6 +259,16 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
 
     uint8_t frameIndex = payload[0];
     uint8_t totalFrames = payload[1];
+
+    // Bytes 2-3 del header: animationId (u16). Backends antiguos mandan 0.
+    // Con prefetch puede haber frames rezagados de la animacion anterior en
+    // vuelo: descartarlos para no corromper el buffer de la nueva.
+    uint16_t hdrAnimId = ((uint16_t)payload[2] << 8) | payload[3];
+    if (hdrAnimId != 0 && currentAnimationId > 0 &&
+        hdrAnimId != (uint16_t)(currentAnimationId & 0xFFFF)) {
+        LOGF("[MQTT:anim] Frame de animacion %d descartado (descargando %d)", hdrAnimId, currentAnimationId);
+        return;
+    }
 
     if (frameIndex >= MAX_ANIM_FRAMES || frameIndex >= totalFrames) {
         LOGF("[MQTT:anim] Frame index out of range: %d/%d", frameIndex, totalFrames);

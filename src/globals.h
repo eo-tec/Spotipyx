@@ -161,18 +161,31 @@ void overlayMaskClear();
 extern bool hasPsram;
 extern uint8_t animFrameWidth;   // 64 or 32 depending on PSRAM
 extern uint16_t animFrameSize;   // bytes per frame (8192 or 2048)
-extern uint8_t* animBuffer; // allocated dynamically when needed
+
+// -- Estado de DESCARGA (la animacion que se esta bajando) --
+extern uint8_t* animBuffer; // download buffer, allocated dynamically when needed
 extern uint8_t animFrameCount;
 extern uint8_t animFps;
 extern uint8_t animFramesReceived;
 extern bool animReady;
-extern bool animPlaying;
 extern int currentAnimationId;
+extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
+extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
+
+// -- Estado de REPRODUCCION (la animacion en pantalla; buffer independiente
+//    para poder descargar la siguiente mientras esta se reproduce) --
+extern uint8_t* playBuffer;
+extern uint8_t playFrameCount;
+extern unsigned long playFrameInterval;
+extern unsigned long playMaxLoops;   // vueltas para cubrir ~secsPhotos
+extern bool animPlaying;
 extern uint8_t animCurrentFrame;
 extern unsigned long animLastFrameTime;
 extern unsigned long animLoopCount;
-extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
-extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
+
+// Foto estatica recibida por prefetch mientras un video se reproduce:
+// queda en photoBuffer y se pinta cuando el video termina
+extern bool photoPending;
 extern uint64_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
 extern unsigned long animDownloadStartTime; // millis() of last progress (request batch or frame received)
 extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
