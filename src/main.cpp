@@ -456,9 +456,10 @@ void loop()
     if (allowSpotify) {
         // Solo llamar a fetchSongId si el scroll no está activo (evita bloquear el scroll)
         // y si NO estamos cargando una animación (fetchSongId bloquea el hilo hasta 5s
-        // esperando respuesta y congelaría el spinner de carga).
+        // esperando respuesta y congelaría la descarga de frames).
         bool scrollActive = titleNeedsScroll && (titleScrollState == SCROLL_SCROLLING || titleScrollState == SCROLL_RETURNING);
-        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive && !animSpinnerActive) {
+        bool animDownloading = (currentAnimationId > 0 && !animReady);
+        if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive && !animDownloading) {
             songOnline = fetchSongId();
             lastSpotifyCheck = millis();
         }
@@ -499,22 +500,14 @@ void loop()
         }
     }
 
-    // Spinner de carga: mientras la animación se descarga mostramos el spinner en
-    // lugar del título; cuando termina (lista o abortada) pintamos el título real.
-    if (animSpinnerActive) {
-        if (animReady || currentAnimationId <= 0) {
-            animSpinnerActive = false;
-            showPhotoInfo(currentTitle, currentName); // ya sin spinner: dibuja el título
-        } else {
-            updateLoadingSpinner();
-        }
-    }
-
     // Actualizar el scroll del título si es necesario (solo si no hay animación
-    // reproduciéndose ni el spinner de carga ocupando la zona del título)
-    if (!animPlaying && !animSpinnerActive) {
+    // reproduciéndose)
+    if (!animPlaying) {
         updatePhotoInfo();
     }
+
+    // Si la descarga de la animación terminó, sustituir la foto anterior y arrancar
+    startAnimationPlaybackIfReady();
 
     // Reproducir animación frame a frame
     updateAnimationPlayback();
@@ -539,6 +532,8 @@ void loop()
         otaPendingVersion = 0;
     }
 
-    // Durante el spinner de carga iteramos rápido para que la animación sea fluida
-    wait(animPlaying ? 5 : (animSpinnerActive ? 15 : 100));
+    // Durante la descarga de una animación iteramos rápido para drenar los frames
+    // MQTT cuanto antes; durante la reproducción, para que sea fluida
+    bool animActive = animPlaying || (currentAnimationId > 0 && !animReady);
+    wait(animActive ? 5 : 100);
 }

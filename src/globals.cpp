@@ -65,6 +65,7 @@ ScrollState titleScrollState = SCROLL_PAUSED_START;
 bool titleNeedsScroll = false;
 int titleY = 0;
 int nameY = 0;
+int nameX = 0;
 
 // Photo loading
 volatile bool isLoadingPhoto = false;
@@ -117,11 +118,6 @@ unsigned long animFrameInterval = 200;
 uint64_t animFramesBitmap = 0;
 unsigned long animDownloadStartTime = 0;
 uint8_t animRetryCount = 0;
-
-// Loading spinner (shown instead of the title while an animation downloads)
-bool animSpinnerActive = false;
-unsigned long lastSpinnerUpdate = 0;
-uint8_t spinnerFrame = 0;
 
 // Waiting for owner mode
 bool waitingForOwner = false;

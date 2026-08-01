@@ -15,10 +15,9 @@ void displayPhotoFromCenter();
 void showPhotoInfo(String title, String name);
 void updatePhotoInfo();
 void startAnimationDownloadIfNeeded();
+void startAnimationPlaybackIfReady();
 void updateAnimationPlayback();
 void checkAnimationDownloadTimeout();
 void stopAnimation();
-void drawLoadingSpinner();
-void updateLoadingSpinner();
 
 #endif

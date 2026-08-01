@@ -133,6 +133,7 @@ extern ScrollState titleScrollState;
 extern bool titleNeedsScroll;
 extern int titleY;
 extern int nameY;
+extern int nameX; // x real donde se pinto el autor (derecha en una linea, 1 en dos lineas)
 
 // Photo loading
 extern volatile bool isLoadingPhoto;
@@ -173,13 +174,8 @@ extern unsigned long animLoopCount;
 extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
 extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
 extern uint64_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
-extern unsigned long animDownloadStartTime; // millis() when first batch of requests was sent
+extern unsigned long animDownloadStartTime; // millis() of last progress (request batch or frame received)
 extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
-
-// Loading spinner: shown in place of the title while an animation is downloading
-extern bool animSpinnerActive;       // true while the spinner replaces the title
-extern unsigned long lastSpinnerUpdate; // millis() of last spinner frame advance
-extern uint8_t spinnerFrame;         // current spinner glyph index
 
 // Waiting for owner mode (BLE re-entry when no owner)
 extern bool waitingForOwner;

@@ -297,14 +297,12 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
 
     animFramesBitmap |= (1ULL << slot);
     animFramesReceived++;
+    animDownloadStartTime = millis(); // hay progreso: el timeout mide estancamiento, no duracion total
     LOGF("[MQTT:anim] Frame %d->slot %d received (%d/%d stored)", frameIndex, slot, animFramesReceived, animFrameCount);
 
     if (animFramesReceived >= animFrameCount) {
-        animReady = true;
-        animPlaying = true;
-        animCurrentFrame = 0;
-        animLastFrameTime = millis();
-        LOG("[MQTT:anim] All frames received, starting playback");
+        animReady = true; // el loop principal pinta la foto nueva y arranca la reproduccion
+        LOG("[MQTT:anim] All frames received");
     }
 }
 
