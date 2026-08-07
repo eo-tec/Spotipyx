@@ -425,6 +425,20 @@ void showPhotoInfo(String title, String name)
 
 }
 
+// Encola el request de un frame reintentando si la cola de red esta llena,
+// pero acotado: resetea el WDT (un while sin reset causo el TASK_WDT del
+// soak 2026-08-07) y desiste tras capMs — el timeout de descarga re-pedira
+// los frames que falten cuando la red se recupere.
+static bool requestFrameBounded(int animId, int frameIdx, unsigned long capMs) {
+    unsigned long t0 = millis();
+    while (!requestAnimationFrame(animId, frameIdx)) {
+        esp_task_wdt_reset();
+        updateAnimationPlayback();
+        if (millis() - t0 > capMs) return false;
+    }
+    return true;
+}
+
 void startAnimationDownloadIfNeeded() {
     if (currentAnimationId > 0 && animFrameCount > 0 && !animReady) {
         // Bajo lock: la tarea de red puede estar escribiendo un frame rezagado
@@ -493,15 +507,18 @@ void startAnimationDownloadIfNeeded() {
         // Pipelined download: encolar todos los requests; la tarea de red (core 0)
         // los publica y drena las respuestas sin bloquear la reproduccion aqui.
         unsigned long tBurst = millis(); // [Diag]
+        uint8_t queued = 0;
         for (uint8_t slot = 0; slot < animFrameCount; slot++) {
-            // Si la cola de red esta llena, seguir pintando y reintentar el slot
-            while (!requestAnimationFrame(currentAnimationId, slot * animFrameStep)) {
-                updateAnimationPlayback();
+            if (!requestFrameBounded(currentAnimationId, slot * animFrameStep, 3000)) {
+                LOGF("[Anim] Cola de red saturada: rafaga abortada en slot %d/%d (el timeout re-pedira el resto)",
+                     slot, animFrameCount);
+                break;
             }
+            queued++;
             updateAnimationPlayback(); // no congelar un video en curso (prefetch)
         }
-        LOGF("[Diag] Rafaga de %d requests encolada en %lums (playing=%d)",
-             animFrameCount, millis() - tBurst, (int)animPlaying);
+        LOGF("[Diag] Rafaga de %d/%d requests encolada en %lums (playing=%d)",
+             queued, animFrameCount, millis() - tBurst, (int)animPlaying);
         animDownloadStartTime = millis();
     }
 }
@@ -746,8 +763,9 @@ void checkAnimationDownloadTimeout() {
     uint8_t missing = 0;
     for (uint8_t slot = 0; slot < frameCount; slot++) {
         if (!(bitmap & (1ULL << slot))) {
-            while (!requestAnimationFrame(animId, slot * animFrameStep)) {
-                updateAnimationPlayback();
+            if (!requestFrameBounded(animId, slot * animFrameStep, 3000)) {
+                LOGF("[Anim] Cola de red saturada durante retry (slot %d): se reintentara en la proxima ronda", slot);
+                break;
             }
             missing++;
         }
