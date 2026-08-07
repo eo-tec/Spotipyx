@@ -47,3 +47,7 @@ src/config.h
 Thumbs.db
 simulator/dist/
 simulator/tsconfig.tsbuildinfo
+
+# ELFs de releases: imprescindibles para simbolizar backtraces de core dumps,
+# pero demasiado pesados para git (se guardan en local / Minio)
+elf-archive/
