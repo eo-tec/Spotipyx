@@ -139,8 +139,11 @@ extern int nameX; // x real donde se pinto el autor (derecha en una linea, 1 en 
 extern volatile bool isLoadingPhoto;
 extern volatile int pendingNewPhotoId;
 // Acciones MQTT diferidas al core 1 (el callback corre en la tarea de red y no
-// debe ejecutar logica de display/OTA)
+// debe ejecutar logica de display/BLE/OTA ni tocar Strings del core 1)
 extern volatile bool pendingOtaCheck;
+extern volatile bool pendingFactoryReset;
+extern volatile bool pendingEnvVarsReset;
+extern volatile uint8_t pendingOwnerUI; // 0=nada, 1=aplicar UI de entrada, 2=de salida
 
 // Drawing mode
 extern bool drawingMode;

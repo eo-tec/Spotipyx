@@ -71,6 +71,9 @@ int nameX = 0;
 volatile bool isLoadingPhoto = false;
 volatile int pendingNewPhotoId = -1;
 volatile bool pendingOtaCheck = false;
+volatile bool pendingFactoryReset = false;
+volatile bool pendingEnvVarsReset = false;
+volatile uint8_t pendingOwnerUI = 0;
 
 // Drawing mode
 bool drawingMode = false;

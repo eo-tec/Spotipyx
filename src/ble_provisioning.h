@@ -8,8 +8,9 @@ void setupBLE();
 void processBLENetworkScan();
 bool processBLECredentials();
 bool processBLECredentialsNonBlocking();
-void enterWaitingForOwnerMode();
-void exitWaitingForOwnerMode();
+void enterWaitingForOwnerMode();  // solo estado; los efectos van al core 1
+void exitWaitingForOwnerMode();   // idem
+void processPendingOwnerUI();     // llamar desde el loop (core 1)
 bool processBLECredentialsAlreadyConnected();
 
 #endif

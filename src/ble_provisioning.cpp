@@ -352,37 +352,48 @@ bool processBLECredentialsNonBlocking() {
     return false;
 }
 
+// Los handlers MQTT corren en la tarea de red (core 0): aqui solo se cambia el
+// ESTADO (sin heap, seguro desde cualquier core). Los efectos (BLE + display)
+// los aplica el core 1 via processPendingOwnerUI() en el loop.
 void enterWaitingForOwnerMode() {
     if (waitingForOwner) return;
 
     waitingForOwner = true;
     bleCredentialsReceived = false;
+    pendingOwnerUI = 1;
     LOG("[Owner] Entering waiting-for-owner mode (BLE active, WiFi/MQTT maintained)");
-
-    // Start BLE if not already running
-    if (pBLEServer == nullptr) {
-        setupBLE();
-    }
-
-    // Show waiting screen
-    dma_display->clearScreen();
-    dma_display->fillScreen(myWHITE);
-    drawLogo();
-    showLoadingMsg(MSG_LINK_APP);
 }
 
 void exitWaitingForOwnerMode() {
     if (!waitingForOwner) return;
 
     waitingForOwner = false;
+    pendingOwnerUI = 2;
     LOG("[Owner] Exiting waiting-for-owner mode");
+}
 
-    // Stop BLE
-    if (pBLEServer != nullptr) {
-        NimBLEDevice::deinit(true);
-        pBLEServer = nullptr;
-        pWifiCredentialsChar = nullptr;
-        pResponseChar = nullptr;
+// Solo core 1. Idempotente sobre el estado real de BLE, asi un enter+exit
+// rapido (antes de procesarse) queda en no-op.
+void processPendingOwnerUI() {
+    uint8_t action = pendingOwnerUI;
+    if (action == 0) return;
+    pendingOwnerUI = 0;
+
+    if (action == 1 && waitingForOwner) {
+        if (pBLEServer == nullptr) {
+            setupBLE();
+        }
+        dma_display->clearScreen();
+        dma_display->fillScreen(myWHITE);
+        drawLogo();
+        showLoadingMsg(MSG_LINK_APP);
+    } else if (action == 2 && !waitingForOwner) {
+        if (pBLEServer != nullptr) {
+            NimBLEDevice::deinit(true);
+            pBLEServer = nullptr;
+            pWifiCredentialsChar = nullptr;
+            pResponseChar = nullptr;
+        }
     }
 }
 

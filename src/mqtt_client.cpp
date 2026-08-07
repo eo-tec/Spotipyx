@@ -152,57 +152,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             }
             else if (strcmp(action, "factory_reset") == 0)
             {
-                LOG("Factory reset recibido via MQTT");
-                dma_display->clearScreen();
-                showLoadingMsg(MSG_RESTARTING);
-                delay(2000);
-                preferences.clear();
-                ESP.restart();
+                // Diferido al core 1: toca display (y String loadingMsg)
+                LOG("Factory reset recibido via MQTT (diferido al loop)");
+                pendingFactoryReset = true;
             }
             else if (strcmp(action, "reset_env_vars") == 0)
             {
-                LOG("Reset de variables de entorno recibido via MQTT");
-                dma_display->clearScreen();
-                showLoadingMsg(MSG_ONE_MOMENT);
-                delay(1000);
-
-                // Resetear variables de entorno sin reiniciar el dispositivo
-                preferences.begin("wifi", false);
-                preferences.clear();
-                preferences.end();
-
-                // Reinicializar con valores por defecto
-                preferences.begin("wifi", false);
-                preferences.putInt("currentVersion", 0);
-                preferences.putInt("frameId", 0);
-                preferences.putInt("brightness", 50);
-                preferences.putInt("maxPhotos", 5);
-                preferences.putUInt("secsPhotos", 30000);
-                preferences.putString("ssid", "");
-                preferences.putString("password", "");
-                preferences.putBool("allowSpotify", false);
-                preferences.putString("mqttToken", "");
-                preferences.end();
-
-                // Resetear variables globales
-                brightness = 50;
-                maxPhotos = 5;
-                secsPhotos = 30000;
-                allowSpotify = false;
-                currentVersion = 0;
-                frameId = 0;
-                mqttToken = "";
-                scheduleEnabled = false;
-                scheduleOnHour = 8;
-                scheduleOnMinute = 0;
-                scheduleOffHour = 22;
-                scheduleOffMinute = 0;
-                timezoneOffset = 0;
-                screenOff = false;
-
-                showLoadingMsg(MSG_DONE);
-                delay(2000);
-                dma_display->clearScreen();
+                // Diferido al core 1: toca display, Strings globales y NVS
+                LOG("Reset de variables de entorno recibido via MQTT (diferido al loop)");
+                pendingEnvVarsReset = true;
             }
             else if (strcmp(action, "unlink") == 0)
             {
@@ -371,4 +329,62 @@ void mqttReconnect()
         wait(3000);
         ESP.restart();
     }
+}
+
+// ===== Acciones diferidas desde el callback MQTT (ejecutan en core 1) =====
+
+void applyFactoryReset()
+{
+    LOG("Aplicando factory reset");
+    dma_display->clearScreen();
+    showLoadingMsg(MSG_RESTARTING);
+    delay(2000);
+    preferences.clear();
+    ESP.restart();
+}
+
+void applyEnvVarsReset()
+{
+    LOG("Aplicando reset de variables de entorno");
+    dma_display->clearScreen();
+    showLoadingMsg(MSG_ONE_MOMENT);
+    delay(1000);
+
+    // Resetear variables de entorno sin reiniciar el dispositivo
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+
+    // Reinicializar con valores por defecto
+    preferences.begin("wifi", false);
+    preferences.putInt("currentVersion", 0);
+    preferences.putInt("frameId", 0);
+    preferences.putInt("brightness", 50);
+    preferences.putInt("maxPhotos", 5);
+    preferences.putUInt("secsPhotos", 30000);
+    preferences.putString("ssid", "");
+    preferences.putString("password", "");
+    preferences.putBool("allowSpotify", false);
+    preferences.putString("mqttToken", "");
+    preferences.end();
+
+    // Resetear variables globales
+    brightness = 50;
+    maxPhotos = 5;
+    secsPhotos = 30000;
+    allowSpotify = false;
+    currentVersion = 0;
+    frameId = 0;
+    mqttToken = "";
+    scheduleEnabled = false;
+    scheduleOnHour = 8;
+    scheduleOnMinute = 0;
+    scheduleOffHour = 22;
+    scheduleOffMinute = 0;
+    timezoneOffset = 0;
+    screenOff = false;
+
+    showLoadingMsg(MSG_DONE);
+    delay(2000);
+    dma_display->clearScreen();
 }

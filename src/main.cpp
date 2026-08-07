@@ -439,6 +439,15 @@ void loop()
     }
 
     // Acciones diferidas desde el callback MQTT (que corre en la tarea de red)
+    if (pendingFactoryReset) {
+        pendingFactoryReset = false;
+        applyFactoryReset(); // no vuelve: reinicia
+    }
+    if (pendingEnvVarsReset) {
+        pendingEnvVarsReset = false;
+        applyEnvVarsReset();
+    }
+    processPendingOwnerUI(); // BLE + pantalla del modo waiting-for-owner
     if (!isLoadingPhoto) {
         processPendingPhoto();
     }
