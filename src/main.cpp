@@ -581,6 +581,24 @@ void loop()
         otaPendingVersion = 0;
     }
 
+    // [Diag] caza del corruptor de heap (3 crashes StoreProhibited con victimas
+    // distintas): chequear integridad cada segundo y abortar EN EL MOMENTO de
+    // detectarla, con las direcciones corruptas impresas. TEMPORAL: retirar
+    // cuando se encuentre la causa.
+    {
+        static unsigned long lastHeapCheck = 0;
+        if (millis() - lastHeapCheck >= 1000) {
+            lastHeapCheck = millis();
+            if (!heap_caps_check_integrity_all(true)) {
+                LOGF("[Diag] HEAP CORRUPTO detectado en loop (uptime=%lus, playing=%d, dl id=%d %d/%d)",
+                     millis() / 1000, (int)animPlaying, currentAnimationId,
+                     animFramesReceived, animFrameCount);
+                Serial.flush();
+                abort(); // coredump cerca del corruptor, no de la victima
+            }
+        }
+    }
+
     // [Diag] con video activo, una iteracion mas larga que el frame interval
     // significa frames perdidos: volcar el desglose para ver quién bloquea
     {
