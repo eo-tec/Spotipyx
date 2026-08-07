@@ -1,4 +1,5 @@
 #include "spotify.h"
+#include "net_task.h"
 #include "display.h"
 #include "clock.h"
 #include "mqtt_handlers.h"
@@ -9,7 +10,8 @@ String fetchSongId()
 
     // Publicar request via MQTT
     String topic = String("frame/") + String(frameId) + "/request/song";
-    if (!mqttClient.publish(topic.c_str(), "{}")) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), "{}")) {
         LOG("[Spotify:fetchSongId] Error publicando request MQTT");
         return "";
     }
@@ -36,7 +38,8 @@ void fetchAndDrawCover()
     // Publicar request via MQTT
     String topic = String("frame/") + String(frameId) + "/request/cover";
     String payload = "{\"songId\":\"" + songShowing + "\"}";
-    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[Spotify] Error publicando request MQTT");
         showTime();
         LOG("[Spotify] Done");

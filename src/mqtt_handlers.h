@@ -3,6 +3,7 @@
 
 #include "globals.h"
 
+void armMqttResponseWait(); // llamar SIEMPRE antes del netPublish cuya respuesta se va a esperar
 bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000);
 void handleSongResponse(byte* payload, unsigned int length);
 void handleCoverResponse(byte* payload, unsigned int length);
@@ -10,7 +11,7 @@ void handlePhotoResponse(byte* payload, unsigned int length);
 void handleOtaResponse(byte* payload, unsigned int length);
 void handleConfigResponse(byte* payload, unsigned int length);
 void handleAnimationFrameResponse(byte* payload, unsigned int length);
-void requestAnimationFrame(int animationId, int frameIndex);
+bool requestAnimationFrame(int animationId, int frameIndex); // false = cola de red llena, reintentar
 void handleRegisterResponse(byte* payload, unsigned int length);
 void requestConfig();
 bool registerFrameViaMQTT();

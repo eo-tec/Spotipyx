@@ -2,6 +2,7 @@
 #include "display.h"
 #include "clock.h"
 #include "mqtt_handlers.h"
+#include "net_task.h"
 #include <Fonts/Picopixel.h>
 
 // Mark a rectangle in the overlay bitmask
@@ -98,7 +99,8 @@ void showPhoto(int index)
     String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"index\":" + String(index) + ",\"reqId\":" + String(mqttRequestId) + "}";
 
-    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
         processPendingPhoto();
@@ -142,7 +144,8 @@ void showPhotoById(int id)
     String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"id\":" + String(id) + "}";
 
-    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[Photo] Error publicando request MQTT");
         isLoadingPhoto = false;
         processPendingPhoto();
@@ -242,7 +245,8 @@ void showPhotoFromCenterById(int id)
     String topic = String("frame/") + String(frameId) + "/request/photo";
     String payload = "{\"id\":" + String(id) + "}";
 
-    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[PhotoCenter] Error publicando request MQTT");
         isLoadingPhoto = false;
         processPendingPhoto();
@@ -423,6 +427,9 @@ void showPhotoInfo(String title, String name)
 
 void startAnimationDownloadIfNeeded() {
     if (currentAnimationId > 0 && animFrameCount > 0 && !animReady) {
+        // Bajo lock: la tarea de red puede estar escribiendo un frame rezagado
+        // de la animacion anterior en el buffer que vamos a liberar
+        animBufLock();
         if (animBuffer) {
             free(animBuffer);
             animBuffer = nullptr;
@@ -442,6 +449,7 @@ void startAnimationDownloadIfNeeded() {
                 LOGF("[Anim] Not enough RAM for animation (largest block: %d)", maxBlock);
                 currentAnimationId = -1;
                 animFrameCount = 0;
+                animBufUnlock();
                 return;
             }
 
@@ -463,6 +471,7 @@ void startAnimationDownloadIfNeeded() {
             LOGF("[Anim] Failed to allocate %d bytes (free heap: %d, largest block: %d)", needed, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
             currentAnimationId = -1;
             animFrameCount = 0;
+            animBufUnlock();
             return;
         }
 
@@ -479,14 +488,20 @@ void startAnimationDownloadIfNeeded() {
         animFramesReceived = 0;
         animFramesBitmap = 0;
         animRetryCount = 0;
+        animBufUnlock(); // los frames ya pueden empezar a llegar mientras encolamos
 
-        // Pipelined download: publish all frame requests up front so the backend
-        // can serve them from its cache without N round-trips.
+        // Pipelined download: encolar todos los requests; la tarea de red (core 0)
+        // los publica y drena las respuestas sin bloquear la reproduccion aqui.
+        unsigned long tBurst = millis(); // [Diag]
         for (uint8_t slot = 0; slot < animFrameCount; slot++) {
-            requestAnimationFrame(currentAnimationId, slot * animFrameStep);
-            mqttClient.loop(); // flush TX and drain any responses already arriving
+            // Si la cola de red esta llena, seguir pintando y reintentar el slot
+            while (!requestAnimationFrame(currentAnimationId, slot * animFrameStep)) {
+                updateAnimationPlayback();
+            }
             updateAnimationPlayback(); // no congelar un video en curso (prefetch)
         }
+        LOGF("[Diag] Rafaga de %d requests encolada en %lums (playing=%d)",
+             animFrameCount, millis() - tBurst, (int)animPlaying);
         animDownloadStartTime = millis();
     }
 }
@@ -496,11 +511,16 @@ void startAnimationDownloadIfNeeded() {
 // el playback. El buffer de descarga pasa a ser el de reproduccion, dejando la
 // maquinaria de descarga libre para el prefetch del siguiente. Llamada desde el
 // loop principal.
-void startAnimationPlaybackIfReady() {
-    if (!animReady || currentAnimationId <= 0 || !animBuffer) return;
+bool startAnimationPlaybackIfReady() {
+    if (!animReady || currentAnimationId <= 0 || !animBuffer) return false;
     // Si hay un video reproduciendose, dejarle terminar sus vueltas antes del swap
-    if (animPlaying && animLoopCount < playMaxLoops) return;
+    if (animPlaying && animLoopCount < playMaxLoops) return false;
 
+    int animId = currentAnimationId; // para el log (el reset lo pone a -1)
+    unsigned long sinceReady = animReadyTime ? millis() - animReadyTime : 0;
+    unsigned long tSwap = millis();
+
+    animBufLock(); // transferencia del buffer: que la tarea de red no escriba a mitad
     if (playBuffer) free(playBuffer);
     playBuffer = animBuffer;
     animBuffer = nullptr;
@@ -511,6 +531,7 @@ void startAnimationPlaybackIfReady() {
 
     animPlaying = false;
     resetAnimationDownloadState(false);
+    animBufUnlock();
 
     displayPhotoWithFade();
     buildOverlayMask(); // tras pintar el titulo, para que el layout sea el definitivo
@@ -519,7 +540,10 @@ void startAnimationPlaybackIfReady() {
     animLastFrameTime = millis();
     animPlaying = true;
     lastPhotoChange = millis(); // el intervalo de foto empieza cuando la animacion se ve
-    LOG("[Anim] Starting playback");
+    animReadyTime = 0;
+    LOGF("[Anim] Starting playback id=%d (%lums desde ready, swap+fade %lums)",
+         animId, sinceReady, millis() - tSwap);
+    return true;
 }
 
 void drawAnimationFrame(uint8_t frameIndex) {
@@ -560,6 +584,27 @@ void updateAnimationPlayback() {
     // paralelo, ~130ms por mensaje), saltamos los fotogramas atrasados para
     // mantener la velocidad real del video en vez de reproducir a camara lenta.
     uint16_t steps = (now - animLastFrameTime) / playFrameInterval;
+
+    // [Diag] acumular los saltos de catch-up y volcarlos como mucho 1 vez/seg:
+    // el peor retraso individual delata el bloqueo que congela el video
+    {
+        static uint16_t skippedAccum = 0;
+        static unsigned long worstGapMs = 0;
+        static unsigned long lastSkipReport = 0;
+        if (steps > 1) {
+            skippedAccum += steps - 1;
+            unsigned long gap = now - animLastFrameTime;
+            if (gap > worstGapMs) worstGapMs = gap;
+        }
+        if (skippedAccum > 0 && now - lastSkipReport >= 1000) {
+            LOGF("[Diag] Video atrasado: %u frames saltados (peor hueco %lums, interval=%lums, loop=%lu/%lu, dl id=%d %d/%d)",
+                 skippedAccum, worstGapMs, playFrameInterval, animLoopCount, playMaxLoops,
+                 currentAnimationId, animFramesReceived, animFrameCount);
+            skippedAccum = 0;
+            worstGapMs = 0;
+            lastSkipReport = now;
+        }
+    }
     for (uint16_t i = 1; i < steps; i++) {
         animCurrentFrame++;
         if (animCurrentFrame >= playFrameCount) {
@@ -579,7 +624,19 @@ void updateAnimationPlayback() {
     if (animLoopCount >= playMaxLoops) {
         // Si el siguiente video se esta descargando (o ya esta listo), seguimos en
         // bucle hasta que startAnimationPlaybackIfReady haga el swap.
-        if (currentAnimationId > 0) return;
+        if (currentAnimationId > 0) {
+            // [Diag] estas vueltas extra son exactamente "la ultima iteracion se
+            // cuelga antes del siguiente video": registrar cuanto duran y por qué
+            static unsigned long lastExtraLoopLog = 0;
+            if (millis() - lastExtraLoopLog >= 1000) {
+                LOGF("[Diag] Vueltas extra (%lu/%lu): esperando descarga id=%d (%d/%d frames, ready=%d, retry=%d, %lums sin progreso)",
+                     animLoopCount, playMaxLoops, currentAnimationId,
+                     animFramesReceived, animFrameCount, (int)animReady, animRetryCount,
+                     animDownloadStartTime ? millis() - animDownloadStartTime : 0);
+                lastExtraLoopLog = millis();
+            }
+            return;
+        }
 
         if (photoPending) {
             // Prefetch devolvio una foto estatica: ahora es su turno
@@ -627,6 +684,7 @@ void stopPlayback() {
 // Resetea el estado de descarga (y opcionalmente libera su buffer). No toca la
 // reproduccion en curso.
 void resetAnimationDownloadState(bool freeBuffer) {
+    animBufLock(); // llamable desde ambos cores (handlePhotoResponse corre en la tarea de red)
     currentAnimationId = -1;
     animReady = false;
     animFrameCount = 0;
@@ -640,6 +698,7 @@ void resetAnimationDownloadState(bool freeBuffer) {
         free(animBuffer);
         animBuffer = nullptr;
     }
+    animBufUnlock();
 }
 
 void stopAnimation() {
@@ -676,11 +735,20 @@ void checkAnimationDownloadTimeout() {
         return;
     }
 
+    // Copiar el estado bajo lock (bitmap de 64 bits: lectura no atomica) y
+    // publicar fuera, para no retener el mutex mientras la cola de red drena
+    animBufLock();
+    uint64_t bitmap = animFramesBitmap;
+    uint8_t frameCount = animFrameCount;
+    int animId = currentAnimationId;
+    animBufUnlock();
+
     uint8_t missing = 0;
-    for (uint8_t slot = 0; slot < animFrameCount; slot++) {
-        if (!(animFramesBitmap & (1ULL << slot))) {
-            requestAnimationFrame(currentAnimationId, slot * animFrameStep);
-            mqttClient.loop();
+    for (uint8_t slot = 0; slot < frameCount; slot++) {
+        if (!(bitmap & (1ULL << slot))) {
+            while (!requestAnimationFrame(animId, slot * animFrameStep)) {
+                updateAnimationPlayback();
+            }
             missing++;
         }
     }

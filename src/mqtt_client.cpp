@@ -58,9 +58,10 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         {
             if (strcmp(action, "update_photo") == 0)
             {
-                LOG("Se recibio una nueva foto por MQTT");
-                int id = doc["id"];
-                onReceiveNewPic(id);
+                // El callback corre en la tarea de red (core 0): diferir al core 1,
+                // que la logica de mostrar foto toca display y bloquea esperando MQTT
+                LOG("Se recibio una nueva foto por MQTT (diferida al loop)");
+                pendingNewPhotoId = doc["id"];
             }
             else if (strcmp(action, "update_info") == 0)
             {
@@ -143,8 +144,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 #ifdef DEV_MODE
                 LOG("Update command received via MQTT - ignored in DEV_MODE");
                 #else
-                LOG("Se recibio una actualizacion de binario por MQTT");
-                checkForUpdates();
+                // Diferido al core 1: el OTA pinta progreso y reinicia
+                LOG("Se recibio una actualizacion de binario por MQTT (diferida al loop)");
+                pendingOtaCheck = true;
                 #endif
             }
             else if (strcmp(action, "factory_reset") == 0)

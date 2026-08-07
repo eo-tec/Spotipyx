@@ -138,13 +138,16 @@ extern int nameX; // x real donde se pinto el autor (derecha en una linea, 1 en 
 // Photo loading
 extern volatile bool isLoadingPhoto;
 extern volatile int pendingNewPhotoId;
+// Acciones MQTT diferidas al core 1 (el callback corre en la tarea de red y no
+// debe ejecutar logica de display/OTA)
+extern volatile bool pendingOtaCheck;
 
 // Drawing mode
 extern bool drawingMode;
 extern uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X];
 extern unsigned long lastDrawingActivity;
 extern DrawCommand drawCommandBuffer[MAX_DRAW_COMMANDS];
-extern int drawCommandCount;
+extern volatile int drawCommandCount; // compartido core 0 (callback) / core 1 (loop), bajo drawCmdMux
 extern unsigned long lastDrawingUpdate;
 extern int dirtyMinX, dirtyMaxX, dirtyMinY, dirtyMaxY;
 
@@ -163,12 +166,15 @@ extern uint8_t animFrameWidth;   // 64 or 32 depending on PSRAM
 extern uint16_t animFrameSize;   // bytes per frame (8192 or 2048)
 
 // -- Estado de DESCARGA (la animacion que se esta bajando) --
+// Escrito desde la tarea de red (core 0) y leido desde el core 1: volatile
+// para visibilidad entre cores; animBuffer/bitmap ademas van bajo animBufLock()
 extern uint8_t* animBuffer; // download buffer, allocated dynamically when needed
-extern uint8_t animFrameCount;
+extern volatile uint8_t animFrameCount;
 extern uint8_t animFps;
-extern uint8_t animFramesReceived;
-extern bool animReady;
-extern int currentAnimationId;
+extern volatile uint8_t animFramesReceived;
+extern volatile bool animReady;
+extern unsigned long animReadyTime; // millis() en que la descarga se completó (diagnóstico ready→swap)
+extern volatile int currentAnimationId;
 extern uint8_t animFrameStep;        // skip N backend frames to cover full duration
 extern unsigned long animFrameInterval; // ms between frames (replaces 1000/fps when step > 1)
 
@@ -186,7 +192,7 @@ extern unsigned long animLoopCount;
 // Foto estatica recibida por prefetch mientras un video se reproduce:
 // queda en photoBuffer y se pinta cuando el video termina
 extern bool photoPending;
-extern uint64_t animFramesBitmap;    // bit i set = slot i already stored (tolerates out-of-order arrival)
+extern volatile uint64_t animFramesBitmap; // bit i set = slot i already stored (tolerates out-of-order arrival); 64 bits: leer/escribir bajo animBufLock()
 extern unsigned long animDownloadStartTime; // millis() of last progress (request batch or frame received)
 extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
 

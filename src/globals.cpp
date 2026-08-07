@@ -70,13 +70,14 @@ int nameX = 0;
 // Photo loading
 volatile bool isLoadingPhoto = false;
 volatile int pendingNewPhotoId = -1;
+volatile bool pendingOtaCheck = false;
 
 // Drawing mode
 bool drawingMode = false;
 uint16_t drawingBuffer[PANEL_RES_Y][PANEL_RES_X];
 unsigned long lastDrawingActivity = 0;
 DrawCommand drawCommandBuffer[MAX_DRAW_COMMANDS];
-int drawCommandCount = 0;
+volatile int drawCommandCount = 0;
 unsigned long lastDrawingUpdate = 0;
 int dirtyMinX = PANEL_RES_X;
 int dirtyMaxX = -1;
@@ -104,11 +105,12 @@ bool hasPsram = false;
 uint8_t animFrameWidth = 32;      // default to 32x32 (no PSRAM)
 uint16_t animFrameSize = ANIM_FRAME_SIZE_32;
 uint8_t* animBuffer = nullptr;
-uint8_t animFrameCount = 0;
+volatile uint8_t animFrameCount = 0;
 uint8_t animFps = 10;
-uint8_t animFramesReceived = 0;
-bool animReady = false;
-int currentAnimationId = -1;
+volatile uint8_t animFramesReceived = 0;
+volatile bool animReady = false;
+unsigned long animReadyTime = 0;
+volatile int currentAnimationId = -1;
 uint8_t animFrameStep = 1;
 unsigned long animFrameInterval = 200;
 uint8_t* playBuffer = nullptr;
@@ -120,7 +122,7 @@ uint8_t animCurrentFrame = 0;
 unsigned long animLastFrameTime = 0;
 unsigned long animLoopCount = 0;
 bool photoPending = false;
-uint64_t animFramesBitmap = 0;
+volatile uint64_t animFramesBitmap = 0;
 unsigned long animDownloadStartTime = 0;
 uint8_t animRetryCount = 0;
 

@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "net_task.h"
 #include "config.h"
 #include "display.h"
 #include "mqtt_handlers.h"
@@ -30,7 +31,8 @@ void checkForUpdates()
     // Publicar request via MQTT con hw_version
     String topic = String("frame/") + String(frameId) + "/request/ota";
     String payload = String("{\"hw_version\":\"") + HW_VERSION + "\",\"current_version\":" + String(currentVersion) + "}";
-    if (!mqttClient.publish(topic.c_str(), payload.c_str())) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[OTA] Error publicando request MQTT");
         return;
     }

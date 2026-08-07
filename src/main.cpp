@@ -17,6 +17,7 @@
 #include "spotify.h"
 #include "mqtt_client.h"
 #include "boot_report.h"
+#include "net_task.h"
 #include <esp_ota_ops.h>
 
 // Auto-rollback OTA
@@ -348,6 +349,10 @@ void setup()
     // Publicar telemetría de arranque (reset_reason + core dump si lo hubo)
     sendBootReport();
 
+    // A partir de aquí la tarea de red (core 0) es la dueña de mqttClient:
+    // bombea, reconecta y publica; el core 1 encola via netPublish y pinta
+    startNetTask();
+
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
 
@@ -417,11 +422,29 @@ void loop()
 {
     esp_task_wdt_reset();
 
-    // Manejo de MQTT
-    if (!mqttClient.connected()) {
-        mqttReconnect();
-    }else{
-        mqttClient.loop();
+    // [Diag] cronometrar la iteracion para cazar qué congela el video: si una
+    // pasada tarda mas que el interval del video, ese frame se pierde
+    unsigned long tLoopStart = millis();
+    unsigned long dMqtt = 0, dSong = 0;
+
+    // Manejo de MQTT: con la tarea de red activa (core 0) el bombeo y la
+    // reconexion viven alli; sin ella (fallo al crearla) modo clasico
+    if (!netTaskRunning) {
+        if (!mqttClient.connected()) {
+            mqttReconnect();
+        }else{
+            mqttClient.loop();
+        }
+        dMqtt = millis() - tLoopStart;
+    }
+
+    // Acciones diferidas desde el callback MQTT (que corre en la tarea de red)
+    if (!isLoadingPhoto) {
+        processPendingPhoto();
+    }
+    if (pendingOtaCheck && !isLoadingPhoto) {
+        pendingOtaCheck = false;
+        checkForUpdates();
     }
 
     // If waiting for owner, handle BLE and skip normal operation
@@ -468,7 +491,11 @@ void loop()
         bool scrollActive = titleNeedsScroll && (titleScrollState == SCROLL_SCROLLING || titleScrollState == SCROLL_RETURNING);
         bool animDownloading = (currentAnimationId > 0 && !animReady);
         if (millis() - lastSpotifyCheck >= timeToCheckSpotify && !scrollActive && !animDownloading) {
+            // [Diag] fetchSongId bloquea hasta 5s y puede correr con un video en
+            // pantalla (solo se inhibe durante la DESCARGA, no la reproduccion)
+            unsigned long tSong = millis();
             songOnline = fetchSongId();
+            dSong = millis() - tSong;
             lastSpotifyCheck = millis();
         }
         if (songOnline == "" || songOnline == "null") {
@@ -485,7 +512,8 @@ void loop()
                 if (photoIndex >= maxPhotos) {
                     photoIndex = 0;
                 }
-                LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
+                LOGF("[Photo] Mostrando foto %d/%d (%s)", photoIndex, maxPhotos,
+                     changeDue ? "intervalo" : "prefetch con video en curso");
                 showPhotoIndex(photoIndex);
                 photoIndex++;
                 if (changeDue) lastPhotoChange = millis();
@@ -504,7 +532,8 @@ void loop()
             if (photoIndex >= maxPhotos) {
                 photoIndex = 0;
             }
-            LOGF("[Photo] Mostrando foto %d/%d", photoIndex, maxPhotos);
+            LOGF("[Photo] Mostrando foto %d/%d (%s)", photoIndex, maxPhotos,
+                 changeDue ? "intervalo" : "prefetch con video en curso");
             showPhotoIndex(photoIndex);
             photoIndex++;
             if (changeDue) lastPhotoChange = millis();
@@ -518,7 +547,7 @@ void loop()
     }
 
     // Si la descarga de la animación terminó, sustituir la foto anterior y arrancar
-    startAnimationPlaybackIfReady();
+    bool animSwapped = startAnimationPlaybackIfReady();
 
     // Reproducir animación frame a frame
     updateAnimationPlayback();
@@ -541,6 +570,20 @@ void loop()
         esp_ota_mark_app_valid_cancel_rollback(); // inofensivo si el rollback de bootloader esta off
         LOGF("[Rollback] Version %d validada como estable", otaPendingVersion);
         otaPendingVersion = 0;
+    }
+
+    // [Diag] con video activo, una iteracion mas larga que el frame interval
+    // significa frames perdidos: volcar el desglose para ver quién bloquea
+    {
+        bool videoActive = animPlaying || (currentAnimationId > 0 && !animReady);
+        unsigned long dLoop = millis() - tLoopStart;
+        // El swap+fade entre videos dura ~1,6s y es esperado: no es una anomalia
+        if (videoActive && !animSwapped && dLoop > 150) {
+            LOGF("[Diag] Iteracion lenta: %lums (mqtt=%lums, spotify=%lums, playing=%d loop=%lu/%lu, dl id=%d %d/%d ready=%d, heap=%d)",
+                 dLoop, dMqtt, dSong, (int)animPlaying, animLoopCount, playMaxLoops,
+                 currentAnimationId, animFramesReceived, animFrameCount, (int)animReady,
+                 ESP.getFreeHeap());
+        }
     }
 
     // Durante la descarga de una animación iteramos rápido para drenar los frames

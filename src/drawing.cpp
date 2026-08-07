@@ -1,5 +1,9 @@
 #include "drawing.h"
 
+// El buffer de comandos lo escribe el callback MQTT (tarea de red, core 0) y lo
+// consume el loop (core 1): seccion critica corta para count+slots
+static portMUX_TYPE drawCmdMux = portMUX_INITIALIZER_UNLOCKED;
+
 void enterDrawingMode() {
     drawingMode = true;
     lastDrawingActivity = millis();
@@ -68,7 +72,9 @@ void clearDrawingCanvas() {
     if (!drawingMode) return;
 
     // Limpiar buffer de comandos pendientes
+    portENTER_CRITICAL(&drawCmdMux);
     drawCommandCount = 0;
+    portEXIT_CRITICAL(&drawCmdMux);
 
     // Limpiar buffer de dibujo
     for (int y = 0; y < PANEL_RES_Y; y++) {
@@ -94,6 +100,15 @@ void checkDrawingTimeout() {
 void processDrawingBuffer() {
     if (drawCommandCount == 0) return;
 
+    // Sacar un snapshot corto de los comandos y liberar el buffer para que el
+    // callback (core 0) pueda seguir encolando mientras pintamos
+    static DrawCommand localCmds[MAX_DRAW_COMMANDS];
+    portENTER_CRITICAL(&drawCmdMux);
+    int localCount = drawCommandCount;
+    memcpy(localCmds, drawCommandBuffer, localCount * sizeof(DrawCommand));
+    drawCommandCount = 0;
+    portEXIT_CRITICAL(&drawCmdMux);
+
     // Reiniciar dirty rectangle
     dirtyMinX = PANEL_RES_X;
     dirtyMaxX = -1;
@@ -101,8 +116,8 @@ void processDrawingBuffer() {
     dirtyMaxY = -1;
 
     // Procesar todos los comandos pendientes
-    for (int i = 0; i < drawCommandCount; i++) {
-        DrawCommand &cmd = drawCommandBuffer[i];
+    for (int i = 0; i < localCount; i++) {
+        DrawCommand &cmd = localCmds[i];
 
         // Dibujar píxeles según el tamaño del pincel
         int halfSize = (cmd.size - 1) / 2;
@@ -133,12 +148,11 @@ void processDrawingBuffer() {
         }
     }
 
-    // Limpiar el buffer
-    drawCommandCount = 0;
     lastDrawingUpdate = millis();
 }
 
 void addDrawCommand(int x, int y, uint16_t color, int size) {
+    portENTER_CRITICAL(&drawCmdMux);
     if (drawCommandCount < MAX_DRAW_COMMANDS) {
         drawCommandBuffer[drawCommandCount].x = x;
         drawCommandBuffer[drawCommandCount].y = y;
@@ -146,4 +160,5 @@ void addDrawCommand(int x, int y, uint16_t color, int size) {
         drawCommandBuffer[drawCommandCount].size = size;
         drawCommandCount++;
     }
+    portEXIT_CRITICAL(&drawCmdMux);
 }

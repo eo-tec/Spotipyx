@@ -2,19 +2,39 @@
 #include "config.h"
 #include "ble_provisioning.h"
 #include "photos.h"
+#include "net_task.h"
 
 // Forward declaration (defined in mqtt_client.cpp)
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 
-bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
+// Armar la espera ANTES de publicar el request: con la tarea de red en core 0
+// la respuesta puede llegar antes de entrar en waitForMqttResponse, y si los
+// flags se resetearan alli se perderia.
+void armMqttResponseWait() {
     mqttResponseReceived = false;
     mqttResponseSuccess = false;
     mqttResponseType = "";
+}
+
+bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
     unsigned long start = millis();
 
     while ((millis() - start) < timeout) {
         esp_task_wdt_reset();
-        mqttClient.loop();
+        if (!netTaskRunning) {
+            // Sin tarea de red (flujo de setup): bombear aquí como siempre.
+            // [Diag] mqttClient.loop() puede bloquear hasta el socket timeout (2s)
+            // con paquetes fragmentados
+            unsigned long tMqtt = millis();
+            mqttClient.loop();
+            unsigned long dMqtt = millis() - tMqtt;
+            if (dMqtt > 300) {
+                LOGF("[Diag] mqttClient.loop() bloqueó %lums esperando '%s' (playing=%d)",
+                     dMqtt, expectedType, (int)animPlaying);
+            }
+        }
+        // Con tarea de red, el bombeo corre en core 0: aquí solo esperamos el
+        // flag sin dejar de pintar
         updateAnimationPlayback(); // no congelar un video en curso durante la espera
         yield();
         delay(10);
@@ -22,6 +42,12 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
         // Solo salir si recibimos la respuesta del tipo esperado Y fue exitosa
         if (mqttResponseReceived && mqttResponseType == expectedType) {
             if (mqttResponseSuccess) {
+                unsigned long waited = millis() - start;
+                if (waited > 1000) {
+                    LOGF("[Diag] Respuesta '%s' tardó %lums (playing=%d, dl id=%d %d/%d)",
+                         expectedType, waited, (int)animPlaying,
+                         currentAnimationId, animFramesReceived, animFrameCount);
+                }
                 return true;
             }
             // Respuesta stale (reqId incorrecto) - seguir esperando la buena
@@ -252,8 +278,17 @@ void handleConfigResponse(byte* payload, unsigned int length) {
 
 void handleAnimationFrameResponse(byte* payload, unsigned int length) {
     // Backend always sends 64x64 frames (8192 bytes + 4 byte header)
-    if (length < 4 + ANIM_FRAME_SIZE_64 || !animBuffer) {
-        LOGF("[MQTT:anim] Invalid frame (size=%d, buffer=%s)", length, animBuffer ? "ok" : "null");
+    if (length < 4 + ANIM_FRAME_SIZE_64) {
+        LOGF("[MQTT:anim] Invalid frame (size=%d)", length);
+        return;
+    }
+
+    // Corre en la tarea de red (core 0): bloquear el buffer para que el core 1
+    // no lo libere/transfiera (swap, stop, foto nueva) a mitad de escritura
+    animBufLock();
+    if (!animBuffer) {
+        animBufUnlock();
+        LOGF("[MQTT:anim] Frame descartado (buffer null, descarga cancelada)");
         return;
     }
 
@@ -266,11 +301,13 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
     uint16_t hdrAnimId = ((uint16_t)payload[2] << 8) | payload[3];
     if (hdrAnimId != 0 && currentAnimationId > 0 &&
         hdrAnimId != (uint16_t)(currentAnimationId & 0xFFFF)) {
+        animBufUnlock();
         LOGF("[MQTT:anim] Frame de animacion %d descartado (descargando %d)", hdrAnimId, currentAnimationId);
         return;
     }
 
     if (frameIndex >= MAX_ANIM_FRAMES || frameIndex >= totalFrames) {
+        animBufUnlock();
         LOGF("[MQTT:anim] Frame index out of range: %d/%d", frameIndex, totalFrames);
         return;
     }
@@ -279,12 +316,14 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
     // With step>1 we only requested every Nth backend frame, so slot = frameIndex / step.
     uint8_t slot = animFrameStep > 0 ? frameIndex / animFrameStep : 0;
     if (slot >= animFrameCount) {
+        animBufUnlock();
         LOGF("[MQTT:anim] Slot %d out of range (frameCount=%d, step=%d)", slot, animFrameCount, animFrameStep);
         return;
     }
 
     // Drop duplicates: bit already set means we already stored this slot
     if (animFramesBitmap & (1ULL << slot)) {
+        animBufUnlock();
         LOGF("[MQTT:anim] Duplicate frame %d (slot %d), ignoring", frameIndex, slot);
         return;
     }
@@ -307,23 +346,27 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
     }
 
     animFramesBitmap |= (1ULL << slot);
-    animFramesReceived++;
+    animFramesReceived = animFramesReceived + 1;
     animDownloadStartTime = millis(); // hay progreso: el timeout mide estancamiento, no duracion total
     LOGF("[MQTT:anim] Frame %d->slot %d received (%d/%d stored)", frameIndex, slot, animFramesReceived, animFrameCount);
 
     if (animFramesReceived >= animFrameCount) {
         animReady = true; // el loop principal pinta la foto nueva y arranca la reproduccion
-        LOG("[MQTT:anim] All frames received");
+        animReadyTime = millis(); // [Diag] para medir la latencia ready→swap
+        LOGF("[MQTT:anim] All frames received (playing=%d, loop=%lu/%lu)",
+             (int)animPlaying, animLoopCount, playMaxLoops);
     }
+    animBufUnlock();
 }
 
-void requestAnimationFrame(int animationId, int frameIndex) {
+bool requestAnimationFrame(int animationId, int frameIndex) {
     char topic[64];
     snprintf(topic, sizeof(topic), "frame/%d/request/animation/frame", frameId);
     char payload[64];
     snprintf(payload, sizeof(payload), "{\"animationId\":%d,\"frame\":%d}", animationId, frameIndex);
-    mqttClient.publish(topic, payload);
-    LOGF("[MQTT:anim] Requesting frame %d of animation %d", frameIndex, animationId);
+    bool ok = netPublish(topic, payload);
+    if (ok) LOGF("[MQTT:anim] Requesting frame %d of animation %d", frameIndex, animationId);
+    return ok;
 }
 
 void handleRegisterResponse(byte* payload, unsigned int length) {
@@ -367,7 +410,8 @@ void requestConfig()
 
     // Publicar request via MQTT
     String topic = String("frame/") + String(frameId) + "/request/config";
-    if (!mqttClient.publish(topic.c_str(), "{}")) {
+    armMqttResponseWait();
+    if (!netPublish(topic.c_str(), "{}")) {
         LOG("[Config] Error publicando request MQTT");
         return;
     }
@@ -415,6 +459,7 @@ bool registerFrameViaMQTT()
     // Publicar request de registro
     String requestTopic = "frame/mac/" + macAddress + "/request/register";
     LOGF("[MQTT:register] Publicando en: %s", requestTopic.c_str());
+    armMqttResponseWait();
     if (!mqttClient.publish(requestTopic.c_str(), "{}")) {
         LOG("[MQTT:register] Error publicando request");
         mqttClient.disconnect();

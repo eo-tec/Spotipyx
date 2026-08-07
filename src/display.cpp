@@ -1,4 +1,5 @@
 #include "display.h"
+#include "net_task.h"
 #include <ArduinoOTA.h>
 #include <Fonts/FreeSans12pt7b.h>
 #include <Fonts/Picopixel.h>
@@ -10,7 +11,7 @@ void wait(int ms)
     while (millis() - startTime < ms)
     {
         esp_task_wdt_reset();
-        mqttClient.loop();
+        if (!netTaskRunning) mqttClient.loop(); // con tarea de red, el bombeo va en core 0
         ArduinoOTA.handle();
         yield();
     }

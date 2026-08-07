@@ -15,7 +15,7 @@ void displayPhotoFromCenter();
 void showPhotoInfo(String title, String name);
 void updatePhotoInfo();
 void startAnimationDownloadIfNeeded();
-void startAnimationPlaybackIfReady();
+bool startAnimationPlaybackIfReady(); // true = hubo swap+fade (iteracion larga esperada)
 void updateAnimationPlayback();
 void checkAnimationDownloadTimeout();
 bool animPrefetchDue();
