@@ -145,40 +145,26 @@ void drawLogo()
     }
 }
 
-// Texto en Picopixel volcado pixel a pixel: cada pixel elige blanco o negro
-// segun quede por encima (zona invertida, fondo negro) o por debajo (fondo
-// blanco) de la linea de agua, de modo que el texto puede quedar partido.
-static void drawOtaTextLine(const String &text, int top, int waterline)
-{
-    static GFXcanvas1 canvas(PANEL_RES_X, 8);
-    canvas.fillScreen(0);
-    canvas.setFont(&Picopixel);
-    canvas.setTextColor(1);
+// Texto "Actualizando" + "XX%" renderizado en Picopixel sobre un canvas
+// monocromo que luego se usa como mascara en showPercetage(). Franja de
+// 16 filas a partir de OTA_TEXT_TOP (dos lineas, baselines 6 y 14).
+#define OTA_TEXT_TOP 44
+static GFXcanvas1 otaTextCanvas(PANEL_RES_X, 16);
 
+static void renderOtaTextLine(const String &text, int baseline)
+{
     int16_t x1, y1;
     uint16_t w, h;
-    canvas.getTextBounds(text, 0, 6, &x1, &y1, &w, &h);
-    canvas.setCursor((PANEL_RES_X - w) / 2 - (x1 - 0), 6);
-    canvas.print(text);
-
-    uint8_t *buf = canvas.getBuffer();
-    const int rowBytes = (PANEL_RES_X + 7) / 8;
-    for (int cy = 0; cy < 8; cy++)
-    {
-        for (int cx = 0; cx < PANEL_RES_X; cx++)
-        {
-            if (buf[cy * rowBytes + cx / 8] & (0x80 >> (cx & 7)))
-            {
-                int ty = top + cy;
-                drawPixelWithBuffer(cx, ty, ty < waterline ? myWHITE : myBLACK);
-            }
-        }
-    }
+    otaTextCanvas.getTextBounds(text, 0, baseline, &x1, &y1, &w, &h);
+    otaTextCanvas.setCursor((PANEL_RES_X - w) / 2 - (x1 - 0), baseline);
+    otaTextCanvas.print(text);
 }
 
 // Pantalla de OTA: el logo de arranque invertido (fondo negro, letras
 // blancas) que se va "llenando" de blanco de abajo arriba con el progreso.
-// Solo se invierten los pixeles grises; el punto verde se mantiene.
+// Solo se invierten los pixeles grises; el punto de color se mantiene.
+// Todo (fondo, logo y texto) se compone en una sola pasada por pixel para
+// no sobrepintar nada: repintar fondo y luego texto encima parpadea.
 void showPercetage(int percentage)
 {
     percentage = constrain(percentage, 0, 100);
@@ -186,30 +172,47 @@ void showPercetage(int percentage)
         return;
     lastPercentage = percentage;
 
+    otaTextCanvas.fillScreen(0);
+    otaTextCanvas.setFont(&Picopixel);
+    otaTextCanvas.setTextColor(1);
+    renderOtaTextLine("Actualizando", 6);
+    renderOtaTextLine(String(percentage) + "%", 14);
+
     int waterline = PANEL_RES_Y - (percentage * PANEL_RES_Y) / 100;
+    uint8_t *textBuf = otaTextCanvas.getBuffer();
+    const int rowBytes = (PANEL_RES_X + 7) / 8;
 
     for (int y = 0; y < PANEL_RES_Y; y++)
     {
+        int ty = y - OTA_TEXT_TOP;
         for (int x = 0; x < PANEL_RES_X; x++)
         {
-            int idx = (y * 64 + x) * 3;
-            uint8_t g = pgm_read_byte(&LOGO_DATA[idx]);
-            uint8_t r = pgm_read_byte(&LOGO_DATA[idx + 1]);
-            uint8_t b = pgm_read_byte(&LOGO_DATA[idx + 2]);
-            uint8_t mx = max(r, max(g, b));
-            uint8_t mn = min(r, min(g, b));
-            if (y < waterline && (mx - mn) < 40)
+            bool isText = ty >= 0 && ty < 16 &&
+                          (textBuf[ty * rowBytes + x / 8] & (0x80 >> (x & 7)));
+            uint16_t color;
+            if (isText)
             {
-                r = 255 - r;
-                g = 255 - g;
-                b = 255 - b;
+                color = y < waterline ? myWHITE : myBLACK;
             }
-            drawPixelWithBuffer(x, y, dma_display->color565(r, g, b));
+            else
+            {
+                int idx = (y * 64 + x) * 3;
+                uint8_t g = pgm_read_byte(&LOGO_DATA[idx]);
+                uint8_t r = pgm_read_byte(&LOGO_DATA[idx + 1]);
+                uint8_t b = pgm_read_byte(&LOGO_DATA[idx + 2]);
+                uint8_t mx = max(r, max(g, b));
+                uint8_t mn = min(r, min(g, b));
+                if (y < waterline && (mx - mn) < 40)
+                {
+                    r = 255 - r;
+                    g = 255 - g;
+                    b = 255 - b;
+                }
+                color = dma_display->color565(r, g, b);
+            }
+            drawPixelWithBuffer(x, y, color);
         }
     }
-
-    drawOtaTextLine("actualizando", 44, waterline);
-    drawOtaTextLine(String(percentage) + "%", 52, waterline);
 }
 
 void showUpdateMessage()
