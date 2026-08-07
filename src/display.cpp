@@ -7,6 +7,16 @@
 
 void wait(int ms)
 {
+    // Fuera del loopTask (p.ej. mqttReconnect desde la tarea de red, core 0)
+    // solo dormir: esp_task_wdt_reset() y ArduinoOTA.handle() NO son seguros
+    // en concurrencia con el core 1. Crash real cazado por telemetria
+    // (2026-08-07): LoadProhibited en find_task_in_twdt_list con la lista del
+    // task WDT corrupta, loop()->wait()->esp_task_wdt_reset().
+    if (xPortGetCoreID() != 1) {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        return;
+    }
+
     unsigned long startTime = millis();
     while (millis() - startTime < ms)
     {
