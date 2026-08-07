@@ -9,6 +9,7 @@
 #include "schedule.h"
 #include "drawing.h"
 #include "display.h"
+#include "messages.h"
 #include "clock.h"
 #include "ble_provisioning.h"
 #include "ota.h"
@@ -184,7 +185,7 @@ void setup()
         dma_display->clearScreen();
         dma_display->fillScreen(myWHITE);
         drawLogo();
-        showLoadingMsg("Waiting BLE...");
+        showLoadingMsg(MSG_SETUP);
 
         // Esperar credenciales via BLE
         while (!processBLECredentials()) {
@@ -195,7 +196,7 @@ void setup()
 
         // Si llegamos aquí, el WiFi está conectado via BLE
         LOG("WiFi conectado via BLE provisioning");
-        showLoadingMsg("Connected!");
+        showLoadingMsg(MSG_CONNECTED);
     } else {
         // Hay credenciales guardadas, inicializar panel y conectar a WiFi
         initPanel();
@@ -210,7 +211,7 @@ void setup()
         drawLogo();
 
         while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 30000) {
-            showLoadingMsg("Connecting WiFi");
+            showLoadingMsg(MSG_CONNECTING);
             delay(100);
         }
 
@@ -219,7 +220,7 @@ void setup()
 
             // Iniciar servidor BLE
             setupBLE();
-            showLoadingMsg("Waiting BLE...");
+            showLoadingMsg(MSG_SETUP);
 
             // Variables para reintentar WiFi periódicamente
             unsigned long lastWiFiAttempt = 0;
@@ -266,10 +267,10 @@ void setup()
             }
 
             LOG("WiFi conectado (via BLE o reconexión)");
-            showLoadingMsg("Connected!");
+            showLoadingMsg(MSG_CONNECTED);
         } else {
             LOG("WiFi connected OK");
-            showLoadingMsg("Connected to WiFi");
+            showLoadingMsg(MSG_CONNECTED);
         }
     }
 
@@ -333,7 +334,7 @@ void setup()
 
     // Register frame if not registered (via MQTT)
     if (frameId == 0) {
-        showLoadingMsg("Registering...");
+        showLoadingMsg(MSG_ALMOST_READY);
         if (!registerFrameViaMQTT()) {
             LOG("Error registrando frame via MQTT, reintentando...");
             delay(2000);
@@ -342,7 +343,7 @@ void setup()
     }
 
     // Conectar a MQTT
-    showLoadingMsg("Connecting server");
+    showLoadingMsg(MSG_ALMOST_READY);
     mqttReconnect();
 
     // Publicar telemetría de arranque (reset_reason + core dump si lo hubo)
@@ -392,7 +393,7 @@ void setup()
     esp_task_wdt_add(NULL);
     LOG("Watchdog timer inicializado");
 
-    showLoadingMsg("Ready!");
+    showLoadingMsg(MSG_READY);
     delay(500);
 
     // Comprobar si hay música sonando antes de mostrar la primera foto

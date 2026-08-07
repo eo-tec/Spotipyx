@@ -1,6 +1,7 @@
 #include "ble_provisioning.h"
 #include "ble_config.h"
 #include "display.h"
+#include "messages.h"
 
 // Callback para conexiones del servidor BLE
 class FrameBLEServerCallbacks : public NimBLEServerCallbacks {
@@ -271,7 +272,7 @@ bool processBLECredentials() {
     pResponseChar = nullptr;
 
     // Ahora intentar conectar a WiFi (sin BLE activo)
-    showLoadingMsg("Connecting WiFi...");
+    showLoadingMsg(MSG_CONNECTING);
     WiFi.mode(WIFI_STA);
     WiFi.begin(bleReceivedSSID.c_str(), bleReceivedPassword.c_str());
 
@@ -291,9 +292,9 @@ bool processBLECredentials() {
         // Fallo - NO borrar credenciales, reiniciar para volver a modo BLE + reintentos WiFi
         LOG("[BLE] Error: no se pudo conectar a WiFi");
 
-        showLoadingMsg("WiFi Error");
+        showLoadingMsg(MSG_WIFI_ERROR);
         delay(2000);
-        showLoadingMsg("Restarting...");
+        showLoadingMsg(MSG_RESTARTING);
         delay(1000);
 
         // Reiniciar para volver al modo BLE con reintentos WiFi
@@ -326,7 +327,7 @@ bool processBLECredentialsNonBlocking() {
     NimBLEDevice::stopAdvertising();
 
     // Intentar conectar a WiFi
-    showLoadingMsg("Connecting WiFi...");
+    showLoadingMsg(MSG_CONNECTING);
     WiFi.begin(bleReceivedSSID.c_str(), bleReceivedPassword.c_str());
 
     unsigned long start = millis();
@@ -345,9 +346,9 @@ bool processBLECredentialsNonBlocking() {
     LOG("[BLE] WiFi fallo. Reanudando BLE...");
     bleCredentialsReceived = false;
     NimBLEDevice::startAdvertising();
-    showLoadingMsg("WiFi Error");
+    showLoadingMsg(MSG_WIFI_ERROR);
     delay(1000);
-    showLoadingMsg("Waiting BLE...");
+    showLoadingMsg(MSG_SETUP);
     return false;
 }
 
@@ -367,7 +368,7 @@ void enterWaitingForOwnerMode() {
     dma_display->clearScreen();
     dma_display->fillScreen(myWHITE);
     drawLogo();
-    showLoadingMsg("Waiting owner...");
+    showLoadingMsg(MSG_LINK_APP);
 }
 
 void exitWaitingForOwnerMode() {

@@ -1,4 +1,5 @@
 #include "display.h"
+#include "messages.h"
 #include "net_task.h"
 #include <ArduinoOTA.h>
 #include <Adafruit_GFX.h>
@@ -175,7 +176,7 @@ void showPercetage(int percentage)
     otaTextCanvas.fillScreen(0);
     otaTextCanvas.setFont(&Picopixel);
     otaTextCanvas.setTextColor(1);
-    renderOtaTextLine("Actualizando", 6);
+    renderOtaTextLine(MSG_UPDATING, 6);
     renderOtaTextLine(String(percentage) + "%", 14);
 
     int waterline = PANEL_RES_Y - (percentage * PANEL_RES_Y) / 100;
@@ -224,5 +225,5 @@ void showUpdateMessage()
 
 void showCheckMessage()
 {
-    showLoadingMsg("Checking updates");
+    showLoadingMsg(MSG_ONE_MOMENT);
 }

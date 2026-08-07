@@ -1,6 +1,7 @@
 #include "mqtt_client.h"
 #include "config.h"
 #include "display.h"
+#include "messages.h"
 #include "drawing.h"
 #include "photos.h"
 #include "ota.h"
@@ -153,7 +154,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             {
                 LOG("Factory reset recibido via MQTT");
                 dma_display->clearScreen();
-                showLoadingMsg("Factory Reset...");
+                showLoadingMsg(MSG_RESTARTING);
                 delay(2000);
                 preferences.clear();
                 ESP.restart();
@@ -162,7 +163,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
             {
                 LOG("Reset de variables de entorno recibido via MQTT");
                 dma_display->clearScreen();
-                showLoadingMsg("Resetting Env Vars...");
+                showLoadingMsg(MSG_ONE_MOMENT);
                 delay(1000);
 
                 // Resetear variables de entorno sin reiniciar el dispositivo
@@ -199,7 +200,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 timezoneOffset = 0;
                 screenOff = false;
 
-                showLoadingMsg("Env Vars Reset!");
+                showLoadingMsg(MSG_DONE);
                 delay(2000);
                 dma_display->clearScreen();
             }
@@ -365,7 +366,7 @@ void mqttReconnect()
         if (xPortGetCoreID() == 1) {
             // Solo el core 1 puede pintar (display + String no son thread-safe)
             dma_display->clearScreen();
-            showLoadingMsg("MQTT Error");
+            showLoadingMsg(MSG_NET_ERROR);
         }
         wait(3000);
         ESP.restart();

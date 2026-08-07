@@ -58,7 +58,7 @@ static void showOtaScreen(int percentage)
     otaTextCanvas.fillScreen(0);
     otaTextCanvas.setFont(&Picopixel);
     otaTextCanvas.setTextColor(1);
-    renderOtaTextLine("Actualizando", 6);
+    renderOtaTextLine("Updating", 6);
     renderOtaTextLine(String(percentage) + "%", 14);
 
     int waterline = PANEL_RES_Y - (percentage * PANEL_RES_Y) / 100;
