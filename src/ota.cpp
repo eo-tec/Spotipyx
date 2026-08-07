@@ -14,8 +14,7 @@ void checkForUpdates()
     return;
     #endif
 
-    // Asegurar que el tiempo esté sincronizado antes de la actualización
-    timeClient.update();
+    // La hora la mantiene fresca la tarea de red; aquí solo se lee
     time_t now = timeClient.getEpochTime();
     LOGF("Current time (UTC): %lu", now);
     LOGF("Current time (formatted): %s", timeClient.getFormattedTime().c_str());

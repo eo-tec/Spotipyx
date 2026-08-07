@@ -53,6 +53,12 @@ static void netTaskLoop(void*) {
         // paquetes fragmentados; en core 0 ya no congela la reproducción
         mqttClient.loop();
 
+        // Refrescar NTP aquí: NTPClient::update() bloquea 1s por intento cuando
+        // el servidor no responde y encadenaba iteraciones de ~1s en el core 1
+        // (video a 1fps con schedule/reloj activos). El core 1 solo usa los
+        // getters, que operan sobre el epoch cacheado sin tocar red.
+        timeClient.update();
+
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }

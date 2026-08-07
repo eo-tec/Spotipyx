@@ -5,7 +5,6 @@
 void showTime()
 {
     dma_display->clearScreen();
-    timeClient.update();
     // Añadir offset local para mostrar (UTC+2 para España)
     int localHours = (timeClient.getHours() + 2) % 24;
     String currentTime = String(localHours < 10 ? "0" : "") + String(localHours) + ":" +
@@ -53,7 +52,6 @@ void hideClockOverlay() {
 void showClockOverlay() {
     if (!clockEnabled) return;
 
-    timeClient.update();
     int utcHours = timeClient.getHours();
     int utcMinutes = timeClient.getMinutes();
     int utcTotalMinutes = utcHours * 60 + utcMinutes;

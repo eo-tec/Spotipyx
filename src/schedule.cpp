@@ -5,8 +5,8 @@ bool isWithinSchedule() {
         return true;  // Si el horario no está habilitado, siempre encendido
     }
 
-    // Obtener hora UTC del NTPClient
-    timeClient.update();
+    // Hora UTC cacheada del NTPClient (el refresco vive en la tarea de red:
+    // update() bloquea 1s por intento si el NTP no responde)
     int utcHours = timeClient.getHours();
     int utcMinutes = timeClient.getMinutes();
     int utcTotalMinutes = utcHours * 60 + utcMinutes;
