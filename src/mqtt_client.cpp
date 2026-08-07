@@ -326,7 +326,9 @@ void mqttReconnect()
             LOGF("[MQTT:mqttReconnect] Suscribiendo a respuestas: %s", responseTopic.c_str());
             if (mqttClient.subscribe(responseTopic.c_str())) {
                 LOG("[MQTT:mqttReconnect] Suscripción a respuestas exitosa");
-                loadingMsg = "";
+                // loadingMsg es un String global del core 1: solo tocarlo desde alli
+                // (String no es thread-safe y mqttReconnect corre en la tarea de red)
+                if (xPortGetCoreID() == 1) loadingMsg = "";
             } else {
                 LOG("[MQTT:mqttReconnect] Error: fallo en suscripción a respuestas");
             }
@@ -360,8 +362,11 @@ void mqttReconnect()
 
     if (!mqttClient.connected()) {
         LOG("[MQTT:mqttReconnect] Error crítico: máximo de reintentos alcanzado - reiniciando ESP32");
-        dma_display->clearScreen();
-        showLoadingMsg("MQTT Error");
+        if (xPortGetCoreID() == 1) {
+            // Solo el core 1 puede pintar (display + String no son thread-safe)
+            dma_display->clearScreen();
+            showLoadingMsg("MQTT Error");
+        }
         wait(3000);
         ESP.restart();
     }

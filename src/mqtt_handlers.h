@@ -4,7 +4,7 @@
 #include "globals.h"
 
 void armMqttResponseWait(); // llamar SIEMPRE antes del netPublish cuya respuesta se va a esperar
-bool waitForMqttResponse(const char* expectedType, unsigned long timeout = 10000);
+bool waitForMqttResponse(uint8_t expectedType, unsigned long timeout = 10000); // MqttRespType
 void handleSongResponse(byte* payload, unsigned int length);
 void handleCoverResponse(byte* payload, unsigned int length);
 void handlePhotoResponse(byte* payload, unsigned int length);

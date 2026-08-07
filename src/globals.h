@@ -224,9 +224,17 @@ extern char photoTitle[64];
 extern char photoAuthor[64];
 
 // MQTT response flags (request/response pattern)
+// mqttResponseType era un String mutado desde ambos cores: String hace
+// malloc/free en cada asignacion y corrompia el heap (PANIC StoreProhibited
+// en multi_heap, cazado por telemetria 2026-08-07). Enum plano, sin heap.
+enum MqttRespType : uint8_t {
+    RESP_NONE = 0, RESP_SONG, RESP_COVER, RESP_PHOTO,
+    RESP_OTA, RESP_CONFIG, RESP_REGISTER
+};
+const char* respName(uint8_t t);
 extern volatile bool mqttResponseReceived;
 extern volatile bool mqttResponseSuccess;
-extern String mqttResponseType;
+extern volatile uint8_t mqttResponseType; // MqttRespType
 extern uint32_t mqttRequestId;
 extern volatile uint32_t mqttResponseRequestId;
 extern volatile int mqttRegisterFrameId;

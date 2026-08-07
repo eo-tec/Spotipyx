@@ -294,8 +294,7 @@ void setup()
         else
             type = "filesystem";
         LOGF("Inicio de actualización OTA: %s", type.c_str());
-        dma_display->clearScreen();
-        showPercetage(0);
+        showUpdateMessage();
     });
     ArduinoOTA.onEnd([]() {
         LOG("Actualización OTA completada.");

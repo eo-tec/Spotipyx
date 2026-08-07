@@ -13,10 +13,10 @@ void mqttCallback(char *topic, byte *payload, unsigned int length);
 void armMqttResponseWait() {
     mqttResponseReceived = false;
     mqttResponseSuccess = false;
-    mqttResponseType = "";
+    mqttResponseType = RESP_NONE;
 }
 
-bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
+bool waitForMqttResponse(uint8_t expectedType, unsigned long timeout) {
     unsigned long start = millis();
 
     while ((millis() - start) < timeout) {
@@ -30,7 +30,7 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
             unsigned long dMqtt = millis() - tMqtt;
             if (dMqtt > 300) {
                 LOGF("[Diag] mqttClient.loop() bloqueó %lums esperando '%s' (playing=%d)",
-                     dMqtt, expectedType, (int)animPlaying);
+                     dMqtt, respName(expectedType), (int)animPlaying);
             }
         }
         // Con tarea de red, el bombeo corre en core 0: aquí solo esperamos el
@@ -45,28 +45,28 @@ bool waitForMqttResponse(const char* expectedType, unsigned long timeout) {
                 unsigned long waited = millis() - start;
                 if (waited > 1000) {
                     LOGF("[Diag] Respuesta '%s' tardó %lums (playing=%d, dl id=%d %d/%d)",
-                         expectedType, waited, (int)animPlaying,
+                         respName(expectedType), waited, (int)animPlaying,
                          currentAnimationId, animFramesReceived, animFrameCount);
                 }
                 return true;
             }
             // Respuesta stale (reqId incorrecto) - seguir esperando la buena
-            LOGF("[MQTT] Respuesta stale descartada, seguimos esperando '%s'", expectedType);
+            LOGF("[MQTT] Respuesta stale descartada, seguimos esperando '%s'", respName(expectedType));
             mqttResponseReceived = false;
-            mqttResponseType = "";
+            mqttResponseType = RESP_NONE;
             continue;
         }
 
         // Si recibimos respuesta de otro tipo (tardía), ignorarla y seguir esperando
         if (mqttResponseReceived && mqttResponseType != expectedType) {
             LOGF("[MQTT] Ignorando respuesta tardía tipo '%s' (esperando '%s')",
-                 mqttResponseType.c_str(), expectedType);
+                 respName(mqttResponseType), respName(expectedType));
             mqttResponseReceived = false;
-            mqttResponseType = "";
+            mqttResponseType = RESP_NONE;
         }
     }
 
-    LOGF("[MQTT] Timeout esperando respuesta %s", expectedType);
+    LOGF("[MQTT] Timeout esperando respuesta %s", respName(expectedType));
     return false;
 }
 
@@ -92,7 +92,7 @@ void handleSongResponse(byte* payload, unsigned int length) {
 
     mqttResponseReceived = true;
     mqttResponseSuccess = true;
-    mqttResponseType = "song";
+    mqttResponseType = RESP_SONG;
 }
 
 void handleCoverResponse(byte* payload, unsigned int length) {
@@ -105,7 +105,7 @@ void handleCoverResponse(byte* payload, unsigned int length) {
         mqttResponseSuccess = false;
     }
     mqttResponseReceived = true;
-    mqttResponseType = "cover";
+    mqttResponseType = RESP_COVER;
 }
 
 void handlePhotoResponse(byte* payload, unsigned int length) {
@@ -137,7 +137,7 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
                     LOGF("[MQTT] Ignorando foto stale (reqId=%d, esperado=%d): %s",
                          respReqId, mqttRequestId, (const char*)(doc["title"] | "?"));
                     mqttResponseReceived = true;
-                    mqttResponseType = "photo";
+                    mqttResponseType = RESP_PHOTO;
                     mqttResponseSuccess = false;
                     return;
                 }
@@ -175,7 +175,7 @@ void handlePhotoResponse(byte* payload, unsigned int length) {
         mqttResponseSuccess = false;
     }
     mqttResponseReceived = true;
-    mqttResponseType = "photo";
+    mqttResponseType = RESP_PHOTO;
 }
 
 void handleOtaResponse(byte* payload, unsigned int length) {
@@ -188,7 +188,7 @@ void handleOtaResponse(byte* payload, unsigned int length) {
         mqttResponseSuccess = false;
     }
     mqttResponseReceived = true;
-    mqttResponseType = "ota";
+    mqttResponseType = RESP_OTA;
 }
 
 void handleConfigResponse(byte* payload, unsigned int length) {
@@ -273,7 +273,7 @@ void handleConfigResponse(byte* payload, unsigned int length) {
         mqttResponseSuccess = false;
     }
     mqttResponseReceived = true;
-    mqttResponseType = "config";
+    mqttResponseType = RESP_CONFIG;
 }
 
 void handleAnimationFrameResponse(byte* payload, unsigned int length) {
@@ -401,7 +401,7 @@ void handleRegisterResponse(byte* payload, unsigned int length) {
         mqttResponseSuccess = false;
     }
     mqttResponseReceived = true;
-    mqttResponseType = "register";
+    mqttResponseType = RESP_REGISTER;
 }
 
 void requestConfig()
@@ -417,7 +417,7 @@ void requestConfig()
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("config", 10000)) {
+    if (waitForMqttResponse(RESP_CONFIG, 10000)) {
         LOG("[Config] Configuración aplicada correctamente");
     } else {
         LOG("[Config] Error recibiendo configuración via MQTT");
@@ -467,7 +467,7 @@ bool registerFrameViaMQTT()
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("register", 10000)) {
+    if (waitForMqttResponse(RESP_REGISTER, 10000)) {
         if (mqttRegisterFrameId > 0) {
             frameId = mqttRegisterFrameId;
             preferences.putInt("frameId", frameId);

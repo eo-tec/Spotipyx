@@ -108,7 +108,7 @@ void showPhoto(int index)
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("photo", 15000)) {
+    if (waitForMqttResponse(RESP_PHOTO, 15000)) {
         esp_task_wdt_reset();
         LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         if (currentAnimationId > 0) {
@@ -153,7 +153,7 @@ void showPhotoById(int id)
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("photo", 15000)) {
+    if (waitForMqttResponse(RESP_PHOTO, 15000)) {
         esp_task_wdt_reset();
         LOGF("[Photo] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         if (currentAnimationId > 0) {
@@ -254,7 +254,7 @@ void showPhotoFromCenterById(int id)
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("photo", 15000)) {
+    if (waitForMqttResponse(RESP_PHOTO, 15000)) {
         esp_task_wdt_reset();
         LOGF("[PhotoCenter] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
         if (currentAnimationId > 0) {

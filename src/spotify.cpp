@@ -17,7 +17,7 @@ String fetchSongId()
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("song", 5000)) {
+    if (waitForMqttResponse(RESP_SONG, 5000)) {
         // Solo log si es una canción diferente
         if (songIdBuffer[0] != '\0' && songShowing != String(songIdBuffer)) {
             LOGF("Nueva canción: %s", songIdBuffer);
@@ -47,7 +47,7 @@ void fetchAndDrawCover()
     }
 
     // Esperar respuesta
-    if (waitForMqttResponse("cover", 15000)) {
+    if (waitForMqttResponse(RESP_COVER, 15000)) {
         esp_task_wdt_reset();
 
         LOG("[Spotify] Animation start");

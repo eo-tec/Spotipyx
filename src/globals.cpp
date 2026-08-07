@@ -156,7 +156,18 @@ char photoAuthor[64];
 // MQTT response flags
 volatile bool mqttResponseReceived = false;
 volatile bool mqttResponseSuccess = false;
-String mqttResponseType = "";
+volatile uint8_t mqttResponseType = RESP_NONE;
+const char* respName(uint8_t t) {
+    switch (t) {
+        case RESP_SONG: return "song";
+        case RESP_COVER: return "cover";
+        case RESP_PHOTO: return "photo";
+        case RESP_OTA: return "ota";
+        case RESP_CONFIG: return "config";
+        case RESP_REGISTER: return "register";
+        default: return "none";
+    }
+}
 uint32_t mqttRequestId = 0;
 volatile uint32_t mqttResponseRequestId = 0;
 volatile int mqttRegisterFrameId = 0;

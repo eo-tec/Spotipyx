@@ -37,7 +37,7 @@ void checkForUpdates()
     }
 
     // Esperar respuesta
-    if (!waitForMqttResponse("ota", 10000)) {
+    if (!waitForMqttResponse(RESP_OTA, 10000)) {
         LOG("[OTA] Error recibiendo respuesta de versión via MQTT");
         return;
     }
