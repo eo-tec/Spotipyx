@@ -16,6 +16,7 @@
 #include "photos.h"
 #include "spotify.h"
 #include "mqtt_client.h"
+#include "boot_report.h"
 #include <esp_ota_ops.h>
 
 // Auto-rollback OTA
@@ -110,6 +111,10 @@ void setup()
     allowSpotify = preferences.getBool("allowSpotify", true);
     maxPhotos = preferences.getInt("maxPhotos", 5);
     currentVersion = preferences.getInt("currentVersion", 0);
+
+    // Telemetría de arranque: capturar reset_reason y contar el boot en NVS
+    // (el envío se hace tras conectar MQTT, en sendBootReport())
+    bootReportInit();
 
     // --- Auto-rollback OTA --------------------------------------------------
     // Si venimos de instalar una version nueva (pendingVer>0) contamos arranques.
@@ -339,6 +344,9 @@ void setup()
     // Conectar a MQTT
     showLoadingMsg("Connecting server");
     mqttReconnect();
+
+    // Publicar telemetría de arranque (reset_reason + core dump si lo hubo)
+    sendBootReport();
 
     // Solicitar configuración via MQTT (después de conectar)
     requestConfig();
