@@ -28,7 +28,9 @@ void exitDrawingMode() {
 
     // Volver al modo normal (mostrar fotos)
     dma_display->clearScreen();
-    // La próxima iteración del loop mostrará una foto
+    // Forzar el cambio de foto YA: sin esto la pantalla se queda negra hasta
+    // que venza el intervalo de fotos (hasta secsPhotos segundos)
+    lastPhotoChange = 0;
 }
 
 void updateDrawingDisplay() {
