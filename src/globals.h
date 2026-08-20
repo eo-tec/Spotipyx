@@ -161,7 +161,12 @@ bool overlayMaskGet(int x, int y);
 void overlayMaskClear();
 
 // Animation playback
-#define MAX_ANIM_FRAMES 60
+// 120 frames a 15 fps = 8 s de video (ver MAX_ANIMATION_FRAMES en el backend y
+// RECORDING_DURATION en la app: los tres numeros tienen que cuadrar).
+// Tope duro del protocolo: frameIndex/totalFrames viajan como u8 en la cabecera
+// MQTT, asi que 255 frames (17 s) es el maximo sin cambiar el formato binario.
+#define MAX_ANIM_FRAMES 120
+#define ANIM_BITMAP_BYTES ((MAX_ANIM_FRAMES + 7) / 8)
 #define ANIM_FRAME_SIZE_64 (64 * 64 * 2) // 8192 bytes RGB565
 #define ANIM_FRAME_SIZE_32 (32 * 32 * 2) // 2048 bytes RGB565
 extern bool hasPsram;
@@ -195,7 +200,19 @@ extern unsigned long animLoopCount;
 // Foto estatica recibida por prefetch mientras un video se reproduce:
 // queda en photoBuffer y se pinta cuando el video termina
 extern bool photoPending;
-extern volatile uint64_t animFramesBitmap; // bit i set = slot i already stored (tolerates out-of-order arrival); 64 bits: leer/escribir bajo animBufLock()
+// bit i set = slot i already stored (tolerates out-of-order arrival). Era un
+// uint64_t, que topaba la duracion del video en 64 frames; ahora es un array de
+// bytes dimensionado por MAX_ANIM_FRAMES. Leer/escribir bajo animBufLock().
+extern volatile uint8_t animFramesBitmap[ANIM_BITMAP_BYTES];
+inline bool animSlotIsSet(const volatile uint8_t* bitmap, uint8_t slot) {
+    return slot < MAX_ANIM_FRAMES && (bitmap[slot >> 3] & (1u << (slot & 7)));
+}
+inline void animSlotSet(volatile uint8_t* bitmap, uint8_t slot) {
+    if (slot < MAX_ANIM_FRAMES) bitmap[slot >> 3] |= (1u << (slot & 7));
+}
+inline void animSlotsClear(volatile uint8_t* bitmap) {
+    for (uint8_t i = 0; i < ANIM_BITMAP_BYTES; i++) bitmap[i] = 0;
+}
 extern unsigned long animDownloadStartTime; // millis() of last progress (request batch or frame received)
 extern uint8_t animRetryCount;       // how many timeout retries we've issued for current animation
 

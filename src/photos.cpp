@@ -457,7 +457,9 @@ void startAnimationDownloadIfNeeded() {
             // Limit frames to fit in largest contiguous free block (with 8KB safety margin)
             size_t maxBlock = ESP.getMaxAllocHeap();
             size_t safeBlock = maxBlock > 8192 ? maxBlock - 8192 : 0;
-            uint8_t maxFrames = safeBlock / animFrameSize;
+            // En size_t: con frames de 2 KB un bloque grande desbordaria un u8
+            size_t maxFrames = safeBlock / animFrameSize;
+            if (maxFrames > MAX_ANIM_FRAMES) maxFrames = MAX_ANIM_FRAMES;
 
             if (maxFrames < 2) {
                 LOGF("[Anim] Not enough RAM for animation (largest block: %d)", maxBlock);
@@ -473,6 +475,17 @@ void startAnimationDownloadIfNeeded() {
                 framesToUse = totalBackendFrames / animFrameStep;
                 if (framesToUse < 2) framesToUse = 2;
             }
+        }
+
+        // Red de seguridad comun a ambas ramas: los slots indexan animBuffer y el
+        // bitmap, asi que un backend que anuncie mas frames de los que soportamos
+        // (u8 admite hasta 255) tiene que acabar submuestreado, no desbordando.
+        if (framesToUse > MAX_ANIM_FRAMES) {
+            animFrameStep = (totalBackendFrames + MAX_ANIM_FRAMES - 1) / MAX_ANIM_FRAMES;
+            framesToUse = totalBackendFrames / animFrameStep;
+            if (framesToUse > MAX_ANIM_FRAMES) framesToUse = MAX_ANIM_FRAMES;
+            LOGF("[Anim] %d frames anunciados > MAX_ANIM_FRAMES: submuestreo a %d (step=%d)",
+                 totalBackendFrames, framesToUse, animFrameStep);
         }
 
         size_t needed = framesToUse * animFrameSize;
@@ -500,7 +513,7 @@ void startAnimationDownloadIfNeeded() {
              animFrameWidth, animFrameWidth, hasPsram ? "PSRAM" : "RAM",
              animFrameInterval);
         animFramesReceived = 0;
-        animFramesBitmap = 0;
+        animSlotsClear(animFramesBitmap);
         animRetryCount = 0;
         animBufUnlock(); // los frames ya pueden empezar a llegar mientras encolamos
 
@@ -706,7 +719,7 @@ void resetAnimationDownloadState(bool freeBuffer) {
     animReady = false;
     animFrameCount = 0;
     animFramesReceived = 0;
-    animFramesBitmap = 0;
+    animSlotsClear(animFramesBitmap);
     animFrameStep = 1;
     animFrameInterval = 200;
     animRetryCount = 0;
@@ -752,17 +765,19 @@ void checkAnimationDownloadTimeout() {
         return;
     }
 
-    // Copiar el estado bajo lock (bitmap de 64 bits: lectura no atomica) y
-    // publicar fuera, para no retener el mutex mientras la cola de red drena
+    // Copiar el estado bajo lock (el bitmap ya no cabe en una palabra: lectura
+    // no atomica) y publicar fuera, para no retener el mutex mientras la cola de
+    // red drena
     animBufLock();
-    uint64_t bitmap = animFramesBitmap;
+    uint8_t bitmap[ANIM_BITMAP_BYTES];
+    for (uint8_t i = 0; i < ANIM_BITMAP_BYTES; i++) bitmap[i] = animFramesBitmap[i];
     uint8_t frameCount = animFrameCount;
     int animId = currentAnimationId;
     animBufUnlock();
 
     uint8_t missing = 0;
     for (uint8_t slot = 0; slot < frameCount; slot++) {
-        if (!(bitmap & (1ULL << slot))) {
+        if (!animSlotIsSet(bitmap, slot)) {
             if (!requestFrameBounded(animId, slot * animFrameStep, 3000)) {
                 LOGF("[Anim] Cola de red saturada durante retry (slot %d): se reintentara en la proxima ronda", slot);
                 break;

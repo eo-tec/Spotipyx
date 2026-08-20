@@ -125,7 +125,7 @@ uint8_t animCurrentFrame = 0;
 unsigned long animLastFrameTime = 0;
 unsigned long animLoopCount = 0;
 bool photoPending = false;
-volatile uint64_t animFramesBitmap = 0;
+volatile uint8_t animFramesBitmap[ANIM_BITMAP_BYTES] = {0};
 unsigned long animDownloadStartTime = 0;
 uint8_t animRetryCount = 0;
 

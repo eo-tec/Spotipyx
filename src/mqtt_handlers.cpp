@@ -322,7 +322,7 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
     }
 
     // Drop duplicates: bit already set means we already stored this slot
-    if (animFramesBitmap & (1ULL << slot)) {
+    if (animSlotIsSet(animFramesBitmap, slot)) {
         animBufUnlock();
         LOGF("[MQTT:anim] Duplicate frame %d (slot %d), ignoring", frameIndex, slot);
         return;
@@ -345,7 +345,7 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
         }
     }
 
-    animFramesBitmap |= (1ULL << slot);
+    animSlotSet(animFramesBitmap, slot);
     animFramesReceived = animFramesReceived + 1;
     animDownloadStartTime = millis(); // hay progreso: el timeout mide estancamiento, no duracion total
     LOGF("[MQTT:anim] Frame %d->slot %d received (%d/%d stored)", frameIndex, slot, animFramesReceived, animFrameCount);
