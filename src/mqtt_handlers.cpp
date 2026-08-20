@@ -277,9 +277,18 @@ void handleConfigResponse(byte* payload, unsigned int length) {
 }
 
 void handleAnimationFrameResponse(byte* payload, unsigned int length) {
-    // Backend always sends 64x64 frames (8192 bytes + 4 byte header)
-    if (length < 4 + ANIM_FRAME_SIZE_64) {
-        LOGF("[MQTT:anim] Invalid frame (size=%d)", length);
+    // El backend manda frames de 64x64 (8192 B) o, para paneles de 32x32 cuyo
+    // firmware sabe pedirlo, ya reducidos a 32x32 (2048 B). El tamaño se deduce
+    // del propio mensaje en lugar de negociarse: un backend antiguo sigue
+    // mandando 64x64 y aqui se reduce como siempre.
+    unsigned int dataLen = length >= 4 ? length - 4 : 0;
+    bool preScaled;
+    if (dataLen >= ANIM_FRAME_SIZE_64) {
+        preScaled = false;
+    } else if (dataLen >= ANIM_FRAME_SIZE_32 && animFrameWidth == 32) {
+        preScaled = true;
+    } else {
+        LOGF("[MQTT:anim] Invalid frame (size=%d, panel=%d)", length, animFrameWidth);
         return;
     }
 
@@ -328,10 +337,13 @@ void handleAnimationFrameResponse(byte* payload, unsigned int length) {
         return;
     }
 
-    uint8_t* src = payload + 4; // 64x64 RGB565 from backend
+    uint8_t* src = payload + 4;
     uint8_t* dst = animBuffer + slot * animFrameSize;
 
-    if (animFrameWidth == 64) {
+    if (preScaled) {
+        // Ya viene a 32x32 desde el backend: nada que reducir
+        memcpy(dst, src, ANIM_FRAME_SIZE_32);
+    } else if (animFrameWidth == 64) {
         memcpy(dst, src, ANIM_FRAME_SIZE_64);
     } else {
         // Downscale 64x64 → 32x32: pick top-left pixel of each 2x2 block
