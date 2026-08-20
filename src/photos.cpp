@@ -257,12 +257,20 @@ void showPhotoFromCenterById(int id)
     if (waitForMqttResponse(RESP_PHOTO, 15000)) {
         esp_task_wdt_reset();
         LOGF("[PhotoCenter] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
+        // La descarga primero: encola en la cola de red (core 0), asi que los
+        // frames van llegando mientras el core 1 pinta.
         if (currentAnimationId > 0) {
             startAnimationDownloadIfNeeded();
         }
-        if (currentAnimationId <= 0) {
-            displayPhotoFromCenter();
-        }
+        // Pintar SIEMPRE, tambien para un video. El push del usuario tiene que
+        // verse en el momento, y la respuesta ya trae el primer frame como foto
+        // (ver el memcpy a photoBuffer en handlePhotoResponse). Antes, con un
+        // video, aqui no se pintaba nada y la pantalla se quedaba con lo anterior
+        // congelado hasta que bajaban los N frames enteros: varios segundos si la
+        // descarga va fina, y bastante mas si necesita reintentos.
+        // Cuando la animacion complete, startAnimationPlaybackIfReady() sustituye
+        // esta imagen fija por la reproduccion.
+        displayPhotoFromCenter();
     } else {
         LOG("[PhotoCenter] Error recibiendo foto via MQTT");
     }
