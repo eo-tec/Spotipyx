@@ -581,10 +581,13 @@ void loop()
         otaPendingVersion = 0;
     }
 
+#ifdef DIAG_HEAP_GUARD
     // [Diag] caza del corruptor de heap (3 crashes StoreProhibited con victimas
     // distintas): chequear integridad cada segundo y abortar EN EL MOMENTO de
-    // detectarla, con las direcciones corruptas impresas. TEMPORAL: retirar
-    // cuando se encuentre la causa.
+    // detectarla, con las direcciones corruptas impresas.
+    // Queda tras un flag y NO va en release: reinicia el frame a proposito, y
+    // ademas recorrer todo el heap cada segundo cuesta tiempo en el loop que
+    // reproduce video. Para retomar la caza: -DDIAG_HEAP_GUARD en el entorno.
     {
         static unsigned long lastHeapCheck = 0;
         if (millis() - lastHeapCheck >= 1000) {
@@ -598,6 +601,7 @@ void loop()
             }
         }
     }
+#endif
 
     // [Diag] con video activo, una iteracion mas larga que el frame interval
     // significa frames perdidos: volcar el desglose para ver quién bloquea
