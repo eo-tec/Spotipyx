@@ -29,6 +29,23 @@ void setup()
 {
 #ifdef HW_V2
     WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Disable brownout (v2 PSU is marginal)
+
+    // Lo primero de todo: dejar el panel apagado. Desde el reset hasta que el
+    // driver DMA toma el control pasan mas de 3 s (el delay de USB-CDC de aqui
+    // abajo), y con los pines flotantes el HUB75 ilumina filas sueltas: se veian
+    // un par de lineas blancas en cada arranque. OE es activo-bajo, asi que HIGH
+    // deshabilita la salida; el resto se dejan en LOW para no meter datos ni
+    // pulsos de reloj mientras tanto.
+    pinMode(OE_PIN, OUTPUT);
+    digitalWrite(OE_PIN, HIGH);
+    const uint8_t panelIdlePins[] = {
+        R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN,
+        A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, CLK_PIN, LAT_PIN,
+    };
+    for (uint8_t pin : panelIdlePins) {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+    }
 #endif
     Serial.begin(115200);
     delay(3000); // Wait for USB-CDC enumeration so early logs are visible
