@@ -81,8 +81,19 @@ void processBLENetworkScan() {
         // funciona igual y evitamos tirar la conexión.
         if (WiFi.status() != WL_CONNECTED) {
             WiFi.mode(WIFI_STA);
+            // Un WiFi.begin() fallido deja el STA ocupado: sin disconnect()
+            // scanNetworks() devuelve WIFI_SCAN_FAILED de inmediato.
+            WiFi.disconnect();
+            delay(200);
         }
-        WiFi.scanNetworks(true, false); // async, sin ocultas
+        int started = WiFi.scanNetworks(true, false); // async, sin ocultas
+        if (started == WIFI_SCAN_FAILED) {
+            LOG("[BLE] Scan WiFi no pudo arrancar");
+            publishNetworksState("{\"state\":\"error\"}");
+            scanInFlight = false;
+            WiFi.scanDelete();
+            return;
+        }
         LOG("[BLE] Scan WiFi lanzado");
         return;
     }

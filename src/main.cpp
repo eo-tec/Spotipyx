@@ -234,6 +234,7 @@ void setup()
 
         if (WiFi.status() != WL_CONNECTED) {
             LOG("Failed to connect to WiFi. Starting BLE provisioning + WiFi retry mode...");
+            WiFi.disconnect();
 
             // Iniciar servidor BLE
             setupBLE();
@@ -275,6 +276,7 @@ void setup()
                         break;
                     }
 
+                    WiFi.disconnect();
                     // Reanudar BLE
                     NimBLEDevice::startAdvertising();
                     LOG("[WiFi] Fallo. Continuando en modo BLE...");
