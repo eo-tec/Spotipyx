@@ -96,15 +96,18 @@ void setup()
     mxconfig.gpio.e = E_PIN;
 #endif
     mxconfig.clkphase = false;
-    // Refresco pensado para las camaras de los moviles: a ~125-210 Hz se veian
-    // bandas al fotografiar o grabar el panel. Con 6 bits de color (en vez de 8)
-    // cada bitplane dura mucho menos y a 20 MHz sale ~376 Hz (lsbMsbTransitionBit=2)
-    // para 64x64. En imagenes de 64x64 la diferencia 8 vs 6 bits apenas se nota, y
-    // es mejor que forzar mas bits de transicion con 8 bits, que da ~326 Hz
-    // perdiendo una gradacion parecida.
-    mxconfig.setPixelColorDepthBits(6);
+#ifdef HW_V2
+    // Medido en v2: a 20 MHz el driver alcanza 137 Hz usando lsbMsbTransitionBit=1,
+    // frente a los 100 Hz con bit=2 de la config anterior (8 MHz / 60). Mejora a la
+    // vez el refresco (menos parpadeo en camara) y la profundidad de color
+    // percibida (menos banding en fotos), porque cada bit de transicion que se
+    // ahorra es gradacion que se conserva.
     mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;
-    mxconfig.min_refresh_rate = 300;
+    mxconfig.min_refresh_rate = 120;
+#else
+    mxconfig.i2sspeed = HUB75_I2S_CFG::HZ_20M;
+    mxconfig.min_refresh_rate = 200;
+#endif
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
 
     auto initPanel = [&]() {
