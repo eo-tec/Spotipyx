@@ -71,7 +71,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 if (doc.containsKey("brightness")) {
                     brightness = doc["brightness"];
                     if (startupBrightnessRampDone) {
-                        dma_display->setBrightness(max(brightness, 10));
+                        dma_display->setBrightness8(panelBrightness(brightness));
                     }
                     preferences.putInt("brightness", brightness);
                     LOGF("[MQTT] Brightness: %d", brightness);

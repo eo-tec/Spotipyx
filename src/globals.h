@@ -89,7 +89,15 @@ extern uint16_t myBLUE;
 extern uint16_t color1, color2, color3, color4, color5;
 
 // Settings
-extern int brightness;
+extern int brightness; // porcentaje 0-100, tal y como lo manda la app
+
+// La app manda el brillo en % (0-100) pero setBrightness8() espera 0-255.
+// El suelo es alto a proposito: la libreria regula el brillo acortando el pulso
+// de OE, y con pulsos muy cortos las camaras de los moviles capturan bandas.
+#define PANEL_BRIGHTNESS_MIN 40
+inline uint8_t panelBrightness(int percent) {
+    return map(constrain(percent, 0, 100), 0, 100, PANEL_BRIGHTNESS_MIN, 255);
+}
 extern bool startupBrightnessRampDone;
 extern int wifiBrightness;
 extern int maxIndex;

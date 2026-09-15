@@ -39,7 +39,7 @@ void updateScreenPower() {
     if (shouldBeOn && screenOff) {
         // Encender pantalla
         LOG("[Schedule] Encendiendo pantalla");
-        dma_display->setBrightness(max(brightness, 10));
+        dma_display->setBrightness8(panelBrightness(brightness));
         screenOff = false;
         // Forzar mostrar foto inmediatamente
         lastPhotoChange = 0;

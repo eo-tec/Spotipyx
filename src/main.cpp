@@ -397,7 +397,7 @@ void setup()
 
     // Rampa gradual de brillo para evitar brownout por pico de corriente
     {
-        int targetBrightness = max(brightness, 10);
+        int targetBrightness = panelBrightness(brightness);
         LOG("[Startup] Rampa de brillo...");
         for (int b = 1; b <= targetBrightness; b++) {
             dma_display->setBrightness8(b);
