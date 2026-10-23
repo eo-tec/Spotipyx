@@ -62,7 +62,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                 // El callback corre en la tarea de red (core 0): diferir al core 1,
                 // que la logica de mostrar foto toca display y bloquea esperando MQTT
                 LOG("Se recibio una nueva foto por MQTT (diferida al loop)");
-                pendingNewPhotoId = doc["id"];
+                queueNewPhoto(doc["id"] | -1);
             }
             else if (strcmp(action, "update_info") == 0)
             {
@@ -122,6 +122,10 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                     preferences.putInt("timezoneOffset", timezoneOffset);
                     LOGF("[MQTT] Timezone offset: %d", timezoneOffset);
                 }
+                if (doc.containsKey("reveal_style")) {
+                    setNewPhotoStyle(doc["reveal_style"] | "");
+                }
+
                 if (doc.containsKey("clock_enabled")) {
                     bool wasEnabled = clockEnabled;
                     clockEnabled = doc["clock_enabled"];

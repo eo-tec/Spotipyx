@@ -4,6 +4,8 @@
 #include "mqtt_handlers.h"
 #include "net_task.h"
 #include <Fonts/Picopixel.h>
+#include <new>
+#include <PhotoReveal.h>
 
 // Mark a rectangle in the overlay bitmask
 void markOverlayRegion(int x, int y, int w, int h) {
@@ -141,8 +143,11 @@ void showPhotoById(int id)
     LOGF("[Photo] Solicitando foto id=%d via MQTT", id);
 
     // Publicar request via MQTT
+    // reqId: si la respuesta llega tarde (tras el timeout) se descarta en vez de
+    // pisar la foto de la peticion siguiente
+    mqttRequestId++;
     String topic = String("frame/") + String(frameId) + "/request/photo";
-    String payload = "{\"id\":" + String(id) + "}";
+    String payload = "{\"id\":" + String(id) + ",\"reqId\":" + String(mqttRequestId) + "}";
 
     armMqttResponseWait();
     if (!netPublish(topic.c_str(), payload.c_str())) {
@@ -171,62 +176,149 @@ void showPhotoById(int id)
     processPendingPhoto();
 }
 
+// Animacion con la que entra una foto que te acaban de mandar. Los estilos estan en
+// lib/photo_reveal y se pueden ver en el Mac con native-sim/ (make run). Cada frame
+// elige el suyo en la app: llega como "reveal_style" en update_info y en la config.
+static const reveal::Style OFFERED_STYLES[] = {
+    reveal::Style::POLAROID, reveal::Style::LETTER, reveal::Style::POSTCARD,
+    reveal::Style::FILM,     reveal::Style::PRINT,  reveal::Style::NEWPIC,
+};
+static const reveal::Style DEFAULT_NEW_PHOTO_STYLE = reveal::Style::POLAROID;
+static volatile reveal::Style newPhotoStyle = DEFAULT_NEW_PHOTO_STYLE;
+
+// Nombre del estilo (el de styleName) -> estilo. Uno desconocido o que no se ofrece
+// en la app vuelve al de por defecto, para que un backend mas nuevo no deje al frame
+// sin animacion.
+static reveal::Style newPhotoStyleFromName(const char *name) {
+    if (name) {
+        for (reveal::Style style : OFFERED_STYLES)
+            if (strcmp(name, reveal::styleName(style)) == 0) return style;
+    }
+    return DEFAULT_NEW_PHOTO_STYLE;
+}
+
+void loadNewPhotoStyle() {
+    if (preferences.isKey("revealStyle"))
+        newPhotoStyle = newPhotoStyleFromName(preferences.getString("revealStyle").c_str());
+    LOGF("[PhotoCenter] Animacion de foto nueva: %s", reveal::styleName(newPhotoStyle));
+}
+
+// Llamable desde la tarea de red (core 0): solo cambia un byte que el core 1 lee al
+// empezar cada animacion. Guarda en flash solo si cambia (la config llega en cada arranque).
+void setNewPhotoStyle(const char *name) {
+    reveal::Style style = newPhotoStyleFromName(name);
+    if (name && style == DEFAULT_NEW_PHOTO_STYLE && strcmp(name, reveal::styleName(style)) != 0)
+        LOGF("[PhotoCenter] Animacion desconocida '%s': se usa %s", name, reveal::styleName(style));
+    if (style == newPhotoStyle) return;
+    newPhotoStyle = style;
+    preferences.putString("revealStyle", reveal::styleName(style));
+    LOGF("[PhotoCenter] Animacion de foto nueva: %s", reveal::styleName(style));
+}
+static const uint32_t NEW_PHOTO_FRAME_MS = 33; // ~30 fps
+
+// Un video que te acaban de mandar se esta descargando y se anunciara al acabar
+static bool revealPending = false;
+
+// Si llegan varias seguidas, cada una se queda al menos esto en pantalla antes de
+// anunciar la siguiente de la cola (un video, ademas, una vuelta entera)
+static const unsigned long NEW_PHOTO_MIN_SHOW_MS = 5000;
+static unsigned long newPhotoShownAt = 0;
+static unsigned long newPhotoMinShowMs = 0;
+
+// El panel trae los canales rotados: lo que entra por el rojo se ve azul, el verde se
+// ve rojo y el azul se ve verde (por eso el resto del firmware pinta con
+// color565(b, r, g)). lib/photo_reveal trabaja con colores reales, asi que se
+// deshace al leer de pantalla y se vuelve a aplicar al pintar.
+
+// Lo que habia en pantalla (screenBuffer, RGB565 con los canales del panel)
+class ScreenSource : public reveal::Source {
+ public:
+    void get(int x, int y, uint8_t &r, uint8_t &g, uint8_t &b) const override {
+        rgb565ToRgb(screenBuffer[y][x], b, r, g);
+    }
+};
+
+// El fotograma de video que se esta viendo (playBuffer, RGB565 con los canales del
+// panel, como drawAnimationFrame). drawAnimationFrame no pasa por screenBuffer, asi
+// que con un video en curso la pantalla anterior se lee de aqui.
+class PlayFrameSource : public reveal::Source {
+ public:
+    const uint8_t *frame = nullptr;
+    void get(int x, int y, uint8_t &r, uint8_t &g, uint8_t &b) const override {
+        int idx = animFrameWidth == 64 ? (y * 64 + x) * 2 : ((y / 2) * 32 + x / 2) * 2;
+        rgb565ToRgb((frame[idx] << 8) | frame[idx + 1], b, r, g);
+    }
+};
+
+// La foto nueva tal como llega del backend (photoBuffer, RGB888 real)
+class PhotoSource : public reveal::Source {
+ public:
+    void get(int x, int y, uint8_t &r, uint8_t &g, uint8_t &b) const override {
+        int idx = (y * 64 + x) * 3;
+        r = photoBuffer[idx];
+        g = photoBuffer[idx + 1];
+        b = photoBuffer[idx + 2];
+    }
+};
+
 void displayPhotoFromCenter()
 {
     // Resetear el estado del scroll del título anterior
     titleNeedsScroll = false;
 
-    const int width = 64;
-    const int height = 64;
-    int centerX = 32;
-    int centerY = 32;
-
-    // Animación de cuadrados de colores
-    uint16_t colors[] = {color1, color2, color3, color4, color5};
-    int numColors = 5;
-
-    for (int colorIndex = 0; colorIndex < numColors; colorIndex++)
-    {
-        for (int size = 2; size <= max(PANEL_RES_X, PANEL_RES_Y); size += 2)
-        {
-            for (int y = centerY - size / 2; y <= centerY + size / 2; y++)
-            {
-                for (int x = centerX - size / 2; x <= centerX + size / 2; x++)
-                {
-                    if (x >= 0 && x < PANEL_RES_X && y >= 0 && y < PANEL_RES_Y)
-                    {
-                        drawPixelWithBuffer(x, y, colors[colorIndex]);
-                    }
-                }
-            }
-            delay(5);
-        }
+    ScreenSource screen;
+    PlayFrameSource playing;
+    const reveal::Source *from = &screen;
+    if (animPlaying && playBuffer && playFrameCount > 0) {
+        uint8_t shown = animCurrentFrame > 0 ? animCurrentFrame - 1 : playFrameCount - 1;
+        playing.frame = playBuffer + shown * animFrameSize;
+        from = &playing;
     }
-
-    // Mostrar imagen desde el centro
-    for (int radius = 0; radius <= max(width, height); radius++)
-    {
-        for (int y = centerY - radius; y <= centerY + radius; y++)
-        {
-            for (int x = centerX - radius; x <= centerX + radius; x++)
-            {
-                if (x >= 0 && x < width && y >= 0 && y < height)
-                {
-                    if (abs(x - centerX) == radius || abs(y - centerY) == radius)
-                    {
-                        int index = (y * width + x) * 3;
-                        uint8_t r = photoBuffer[index + 2];
-                        uint8_t g = photoBuffer[index + 0];
-                        uint8_t b = photoBuffer[index + 1];
-                        uint16_t color = dma_display->color565(r, g, b);
-                        drawPixelWithBuffer(x, y, color);
-                    }
-                }
-            }
+    PhotoSource to;
+    // 12 KB solo mientras dura la animacion. Si no hay memoria, la foto sale sin mas.
+    reveal::Canvas *frame = new (std::nothrow) reveal::Canvas;
+    if (frame) {
+        reveal::Style style = newPhotoStyle;
+        uint32_t duration = reveal::durationMs(style);
+        uint32_t frames = 0, slowest = 0;
+        unsigned long start = millis();
+        for (;;) {
+            uint32_t t = millis() - start;
+            reveal::render(style, *from, to, photoAuthor, t, *frame);
+            for (int y = 0; y < PANEL_RES_Y; y++)
+                for (int x = 0; x < PANEL_RES_X; x++)
+                    dma_display->drawPixelRGB888(x, y, frame->px[y][x][2], frame->px[y][x][0], frame->px[y][x][1]);
+            frames++;
+            uint32_t spent = millis() - start - t;
+            if (spent > slowest) slowest = spent;
+            if (t >= duration) break;
+            esp_task_wdt_reset();
+            if (spent < NEW_PHOTO_FRAME_MS) delay(NEW_PHOTO_FRAME_MS - spent);
         }
-        delay(5);
+        uint32_t elapsed = millis() - start;
+        LOGF("[PhotoCenter] Animacion %s: %u ms, %u fotogramas (%.1f fps, el mas lento %u ms), heap libre %d",
+             reveal::styleName(style), (unsigned)elapsed, (unsigned)frames,
+             frames * 1000.0f / elapsed, (unsigned)slowest, ESP.getFreeHeap());
+        delete frame;
+    } else {
+        LOG("[PhotoCenter] Sin memoria para la animacion");
+    }
+    // Lo que se veia (foto o video) ya no esta: la foto nueva lo sustituye
+    stopPlayback();
+
+    // Lo que queda en pantalla es la foto: dejarla en screenBuffer para los fundidos
+    for (int y = 0; y < PANEL_RES_Y; y++) {
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            uint8_t r, g, b;
+            to.get(x, y, r, g, b);
+            drawPixelWithBuffer(x, y, dma_display->color565(b, r, g));
+        }
     }
     showPhotoInfo(String(photoTitle), String(photoAuthor));
+    showClockOverlay();
+    showDevOverlay();
+    newPhotoShownAt = millis();
+    newPhotoMinShowMs = NEW_PHOTO_MIN_SHOW_MS;
 }
 
 void showPhotoFromCenterById(int id)
@@ -242,14 +334,16 @@ void showPhotoFromCenterById(int id)
     LOGF("[PhotoCenter] Solicitando foto id=%d via MQTT", id);
 
     // Publicar request via MQTT
+    // reqId: si la respuesta llega tarde (tras el timeout) se descarta en vez de
+    // pisar la foto de la peticion siguiente
+    mqttRequestId++;
     String topic = String("frame/") + String(frameId) + "/request/photo";
-    String payload = "{\"id\":" + String(id) + "}";
+    String payload = "{\"id\":" + String(id) + ",\"reqId\":" + String(mqttRequestId) + "}";
 
     armMqttResponseWait();
     if (!netPublish(topic.c_str(), payload.c_str())) {
         LOG("[PhotoCenter] Error publicando request MQTT");
         isLoadingPhoto = false;
-        processPendingPhoto();
         return;
     }
 
@@ -257,27 +351,25 @@ void showPhotoFromCenterById(int id)
     if (waitForMqttResponse(RESP_PHOTO, 15000)) {
         esp_task_wdt_reset();
         LOGF("[PhotoCenter] Foto recibida via MQTT: %s by %s", photoTitle, photoAuthor);
-        // La descarga primero: encola en la cola de red (core 0), asi que los
-        // frames van llegando mientras el core 1 pinta.
+        // Un video se anuncia cuando ya esta entero: hasta entonces sigue lo que
+        // hubiera (si es otro video, reproduciendose) y al acabar la descarga
+        // startAnimationPlaybackIfReady() hace la animacion de foto nueva y lo
+        // arranca sin pausa. Una foto ya esta descargada: se anuncia ahora.
         if (currentAnimationId > 0) {
             startAnimationDownloadIfNeeded();
         }
-        // Pintar SIEMPRE, tambien para un video. El push del usuario tiene que
-        // verse en el momento, y la respuesta ya trae el primer frame como foto
-        // (ver el memcpy a photoBuffer en handlePhotoResponse). Antes, con un
-        // video, aqui no se pintaba nada y la pantalla se quedaba con lo anterior
-        // congelado hasta que bajaban los N frames enteros: varios segundos si la
-        // descarga va fina, y bastante mas si necesita reintentos.
-        // Cuando la animacion complete, startAnimationPlaybackIfReady() sustituye
-        // esta imagen fija por la reproduccion.
-        displayPhotoFromCenter();
+        if (currentAnimationId > 0) {
+            revealPending = true;
+        } else {
+            displayPhotoFromCenter();
+        }
     } else {
         LOG("[PhotoCenter] Error recibiendo foto via MQTT");
     }
 
     songShowing = "";
     isLoadingPhoto = false;
-    processPendingPhoto();
+    // La siguiente foto de la cola la saca el loop (processPendingPhoto)
 }
 
 void showPhotoIndex(int index)
@@ -292,28 +384,67 @@ void showPhotoId(int id)
     showPhotoById(id);
 }
 
+// Fotos que te han mandado y esperan turno. Las mete el callback MQTT (core 0) y las
+// saca el loop (core 1) cuando no hay otra cargandose ni un video nuevo bajando, asi
+// que si llegan varias seguidas salen todas, una detras de otra.
+static const int NEW_PHOTO_QUEUE_SIZE = 6;
+static int newPhotoQueue[NEW_PHOTO_QUEUE_SIZE];
+static int newPhotoQueueCount = 0;
+static portMUX_TYPE newPhotoQueueMux = portMUX_INITIALIZER_UNLOCKED;
+
+void queueNewPhoto(int id) {
+    if (id < 0) return;
+    bool dropped = false;
+    portENTER_CRITICAL(&newPhotoQueueMux);
+    if (newPhotoQueueCount == NEW_PHOTO_QUEUE_SIZE) {
+        // Llena: se pierde la mas antigua, que la ultima es la que se espera ver
+        for (int i = 1; i < NEW_PHOTO_QUEUE_SIZE; i++) newPhotoQueue[i - 1] = newPhotoQueue[i];
+        newPhotoQueueCount--;
+        dropped = true;
+    }
+    newPhotoQueue[newPhotoQueueCount++] = id;
+    portEXIT_CRITICAL(&newPhotoQueueMux);
+    if (dropped) LOGF("[Photo] Cola de fotos nuevas llena: se descarta la mas antigua");
+}
+
+bool hasQueuedNewPhotos() {
+    return newPhotoQueueCount > 0;
+}
+
+static bool takeNewPhoto(int &id) {
+    bool found = false;
+    portENTER_CRITICAL(&newPhotoQueueMux);
+    if (newPhotoQueueCount > 0) {
+        id = newPhotoQueue[0];
+        for (int i = 1; i < newPhotoQueueCount; i++) newPhotoQueue[i - 1] = newPhotoQueue[i];
+        newPhotoQueueCount--;
+        found = true;
+    }
+    portEXIT_CRITICAL(&newPhotoQueueMux);
+    return found;
+}
+
 void processPendingPhoto() {
-    if (pendingNewPhotoId >= 0) {
-        int id = pendingNewPhotoId;
-        pendingNewPhotoId = -1;
-        LOGF("[Photo] Procesando foto pendiente id=%d", id);
+    // Una a una: la siguiente espera a que la anterior se haya anunciado y visto
+    if (isLoadingPhoto || revealPending) return;
+    // Con el panel apagado por horario esperan y se anuncian al encenderse
+    if (screenOff) return;
+    if (newPhotoShownAt && millis() - newPhotoShownAt < newPhotoMinShowMs) return;
+    int id;
+    if (takeNewPhoto(id)) {
+        LOGF("[Photo] Procesando foto nueva id=%d (%d en cola)", id, newPhotoQueueCount);
         onReceiveNewPic(id);
     }
 }
 
 void onReceiveNewPic(int id)
 {
-    // Si ya hay una foto cargándose, guardar como pendiente
-    if (isLoadingPhoto) {
-        LOGF("[Photo] Foto %d guardada como pendiente (hay otra cargando)", id);
-        pendingNewPhotoId = id;
-        return;
-    }
-
     photoIndex = 1;
 
-    // Un push del usuario interrumpe cualquier video en curso o descarga pendiente
-    stopAnimation();
+    // Un push del usuario cancela la descarga en curso (prefetch del siguiente
+    // video), pero lo que se esta viendo sigue hasta que la foto nueva este lista
+    resetAnimationDownloadState(true);
+    photoPending = false;
 
     // Mostrar la foto con animación desde el centro via MQTT
     showPhotoFromCenterById(id);
@@ -447,6 +578,25 @@ static bool requestFrameBounded(int animId, int frameIdx, unsigned long capMs) {
     return true;
 }
 
+// Fotogramas pedidos y aun sin llegar, como mucho. Pedirlos todos de golpe dejaba ~1 MB
+// esperando en el broker y el frame lo traga a ~60 KB/s: un aviso de foto nueva o la
+// respuesta a una peticion de foto llegaban detras de todo eso (hasta 20 s, y la
+// peticion caducaba), tambien tras cancelar la descarga. Con 8 en camino la descarga
+// va igual de rapido y lo que llegue despues espera como mucho ~1,5 s.
+static const uint8_t ANIM_REQUEST_WINDOW = 8;
+static uint8_t animNextSlot = 0; // los slots se piden en orden: [0, animNextSlot) ya pedidos
+
+// Pide los siguientes fotogramas hasta tener ANIM_REQUEST_WINDOW en camino. Llamada
+// desde el loop principal, barata si no hay descarga.
+void pumpAnimationRequests() {
+    if (currentAnimationId <= 0 || !animBuffer || animReady) return;
+    while (animNextSlot < animFrameCount &&
+           animNextSlot - animFramesReceived < ANIM_REQUEST_WINDOW) {
+        if (!requestAnimationFrame(currentAnimationId, animNextSlot * animFrameStep)) return;
+        animNextSlot++;
+    }
+}
+
 void startAnimationDownloadIfNeeded() {
     if (currentAnimationId > 0 && animFrameCount > 0 && !animReady) {
         // Bajo lock: la tarea de red puede estar escribiendo un frame rezagado
@@ -525,22 +675,11 @@ void startAnimationDownloadIfNeeded() {
         animRetryCount = 0;
         animBufUnlock(); // los frames ya pueden empezar a llegar mientras encolamos
 
-        // Pipelined download: encolar todos los requests; la tarea de red (core 0)
-        // los publica y drena las respuestas sin bloquear la reproduccion aqui.
-        unsigned long tBurst = millis(); // [Diag]
-        uint8_t queued = 0;
-        for (uint8_t slot = 0; slot < animFrameCount; slot++) {
-            if (!requestFrameBounded(currentAnimationId, slot * animFrameStep, 3000)) {
-                LOGF("[Anim] Cola de red saturada: rafaga abortada en slot %d/%d (el timeout re-pedira el resto)",
-                     slot, animFrameCount);
-                break;
-            }
-            queued++;
-            updateAnimationPlayback(); // no congelar un video en curso (prefetch)
-        }
-        LOGF("[Diag] Rafaga de %d/%d requests encolada en %lums (playing=%d)",
-             queued, animFrameCount, millis() - tBurst, (int)animPlaying);
+        // Descarga en ventana: la tarea de red (core 0) publica y drena las
+        // respuestas; el loop va pidiendo mas segun llegan (pumpAnimationRequests).
+        animNextSlot = 0;
         animDownloadStartTime = millis();
+        pumpAnimationRequests();
     }
 }
 
@@ -551,12 +690,21 @@ void startAnimationDownloadIfNeeded() {
 // loop principal.
 bool startAnimationPlaybackIfReady() {
     if (!animReady || currentAnimationId <= 0 || !animBuffer) return false;
-    // Si hay un video reproduciendose, dejarle terminar sus vueltas antes del swap
-    if (animPlaying && animLoopCount < playMaxLoops) return false;
+    // Si hay un video reproduciendose, dejarle terminar sus vueltas antes del swap,
+    // salvo que el nuevo sea uno que te acaban de mandar: ese entra ya
+    if (animPlaying && animLoopCount < playMaxLoops && !revealPending) return false;
 
     int animId = currentAnimationId; // para el log (el reset lo pone a -1)
     unsigned long sinceReady = animReadyTime ? millis() - animReadyTime : 0;
     unsigned long tSwap = millis();
+
+    // Video nuevo: la animacion de foto nueva sale de lo que se este viendo y acaba
+    // en su primer frame (photoBuffer), con el titulo puesto. Libera el video anterior.
+    bool reveal = revealPending;
+    if (reveal) {
+        revealPending = false;
+        displayPhotoFromCenter();
+    }
 
     animBufLock(); // transferencia del buffer: que la tarea de red no escriba a mitad
     if (playBuffer) free(playBuffer);
@@ -571,16 +719,17 @@ bool startAnimationPlaybackIfReady() {
     resetAnimationDownloadState(false);
     animBufUnlock();
 
-    displayPhotoWithFade();
+    if (!reveal) displayPhotoWithFade();
     buildOverlayMask(); // tras pintar el titulo, para que el layout sea el definitivo
     animCurrentFrame = 0;
     animLoopCount = 0;
     animLastFrameTime = millis();
     animPlaying = true;
     lastPhotoChange = millis(); // el intervalo de foto empieza cuando la animacion se ve
+    if (reveal) newPhotoMinShowMs = max(NEW_PHOTO_MIN_SHOW_MS, loopMs);
     animReadyTime = 0;
-    LOGF("[Anim] Starting playback id=%d (%lums desde ready, swap+fade %lums)",
-         animId, sinceReady, millis() - tSwap);
+    LOGF("[Anim] Starting playback id=%d (%lums desde ready, %s %lums)",
+         animId, sinceReady, reveal ? "anuncio" : "swap+fade", millis() - tSwap);
     return true;
 }
 
@@ -732,6 +881,7 @@ void resetAnimationDownloadState(bool freeBuffer) {
     animFrameInterval = 200;
     animRetryCount = 0;
     animDownloadStartTime = 0;
+    animNextSlot = 0;
     if (freeBuffer && animBuffer) {
         free(animBuffer);
         animBuffer = nullptr;
@@ -743,6 +893,7 @@ void stopAnimation() {
     stopPlayback();
     resetAnimationDownloadState(true);
     photoPending = false;
+    revealPending = false;
 }
 
 // Re-requests any frames still missing after a stall window (no frame received
@@ -760,7 +911,14 @@ void checkAnimationDownloadTimeout() {
     if (animRetryCount >= ANIM_MAX_RETRIES) {
         LOGF("[Anim] Giving up after %d retries (%d/%d frames)",
              animRetryCount, animFramesReceived, animFrameCount);
-        if (animPlaying) {
+        if (revealPending) {
+            // El video que te han mandado no ha bajado entero: se anuncia su primer
+            // frame como foto, que algo hay que enseñar
+            revealPending = false;
+            resetAnimationDownloadState(true);
+            displayPhotoFromCenter();
+            lastPhotoChange = millis();
+        } else if (animPlaying) {
             // Prefetch fallido: el video actual sigue; al terminar sus vueltas el
             // loop principal pedira otra foto por el camino normal
             resetAnimationDownloadState(true);
@@ -784,7 +942,7 @@ void checkAnimationDownloadTimeout() {
     animBufUnlock();
 
     uint8_t missing = 0;
-    for (uint8_t slot = 0; slot < frameCount; slot++) {
+    for (uint8_t slot = 0; slot < frameCount && slot < animNextSlot; slot++) {
         if (!animSlotIsSet(bitmap, slot)) {
             if (!requestFrameBounded(animId, slot * animFrameStep, 3000)) {
                 LOGF("[Anim] Cola de red saturada durante retry (slot %d): se reintentara en la proxima ronda", slot);

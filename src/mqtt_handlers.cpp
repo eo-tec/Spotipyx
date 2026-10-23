@@ -252,6 +252,9 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putInt("timezoneOffset", timezoneOffset);
                 LOGF("[MQTT] Config timezone offset: %d", timezoneOffset);
             }
+            if (doc.containsKey("reveal_style")) {
+                setNewPhotoStyle(doc["reveal_style"] | "");
+            }
             if (doc.containsKey("clock_enabled")) {
                 clockEnabled = doc["clock_enabled"];
                 preferences.putBool("clockEnabled", clockEnabled);

@@ -69,7 +69,6 @@ int nameX = 0;
 
 // Photo loading
 volatile bool isLoadingPhoto = false;
-volatile int pendingNewPhotoId = -1;
 volatile bool pendingOtaCheck = false;
 volatile bool pendingFactoryReset = false;
 volatile bool pendingEnvVarsReset = false;

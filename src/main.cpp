@@ -188,6 +188,7 @@ void setup()
     scheduleOffMinute = preferences.getInt("schOffMin", 0);
     timezoneOffset = preferences.getInt("timezoneOffset", 0);
     clockEnabled = preferences.getBool("clockEnabled", false);
+    loadNewPhotoStyle();
     mqttToken = preferences.getString("mqttToken", "");
 
     // Si no hay credenciales guardadas, iniciar modo BLE para provisioning
@@ -469,9 +470,7 @@ void loop()
         applyEnvVarsReset();
     }
     processPendingOwnerUI(); // BLE + pantalla del modo waiting-for-owner
-    if (!isLoadingPhoto) {
-        processPendingPhoto();
-    }
+    processPendingPhoto();
     if (pendingOtaCheck && !isLoadingPhoto) {
         pendingOtaCheck = false;
         checkForUpdates();
@@ -582,7 +581,8 @@ void loop()
     // Reproducir animación frame a frame
     updateAnimationPlayback();
 
-    // Reintentar frames perdidos durante la descarga pipelined
+    // Pedir los siguientes fotogramas segun llegan y reintentar los perdidos
+    pumpAnimationRequests();
     checkAnimationDownloadTimeout();
 
     // Actualizar reloj cada 60 segundos

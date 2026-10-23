@@ -1,4 +1,5 @@
 #include "schedule.h"
+#include "photos.h"
 
 bool isWithinSchedule() {
     if (!scheduleEnabled) {
@@ -41,8 +42,9 @@ void updateScreenPower() {
         LOG("[Schedule] Encendiendo pantalla");
         dma_display->setBrightness8(panelBrightness(brightness));
         screenOff = false;
-        // Forzar mostrar foto inmediatamente
-        lastPhotoChange = 0;
+        // Forzar mostrar foto inmediatamente, salvo que te hayan mandado alguna
+        // mientras estaba apagada: esa sale ya con su anuncio
+        if (!hasQueuedNewPhotos()) lastPhotoChange = 0;
     } else if (!shouldBeOn && !screenOff) {
         // Apagar pantalla
         LOG("[Schedule] Apagando pantalla");
