@@ -260,6 +260,14 @@ void handleConfigResponse(byte* payload, unsigned int length) {
                 preferences.putBool("clockEnabled", clockEnabled);
                 LOGF("[MQTT] Config clock enabled: %s", clockEnabled ? "true" : "false");
             }
+            if (doc.containsKey("show_title")) {
+                showTitle = doc["show_title"];
+                preferences.putBool("showTitle", showTitle);
+            }
+            if (doc.containsKey("show_sender")) {
+                showSender = doc["show_sender"];
+                preferences.putBool("showSender", showSender);
+            }
             if (doc.containsKey("has_owner")) {
                 bool hasOwner = doc["has_owner"];
                 LOGF("[MQTT] Config has_owner: %s", hasOwner ? "true" : "false");

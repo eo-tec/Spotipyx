@@ -188,6 +188,8 @@ void setup()
     scheduleOffMinute = preferences.getInt("schOffMin", 0);
     timezoneOffset = preferences.getInt("timezoneOffset", 0);
     clockEnabled = preferences.getBool("clockEnabled", false);
+    showTitle = preferences.getBool("showTitle", true);
+    showSender = preferences.getBool("showSender", true);
     loadNewPhotoStyle();
     mqttToken = preferences.getString("mqttToken", "");
 

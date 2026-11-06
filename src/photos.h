@@ -17,6 +17,7 @@ void displayPhotoFromCenter();
 void loadNewPhotoStyle();
 void setNewPhotoStyle(const char *name); // llamable desde la tarea de red (core 0)
 void showPhotoInfo(String title, String name);
+void refreshPhotoInfo();
 void updatePhotoInfo();
 void startAnimationDownloadIfNeeded();
 void pumpAnimationRequests();

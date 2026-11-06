@@ -51,6 +51,8 @@ bool screenOff = false;
 
 // Clock overlay
 bool clockEnabled = false;
+bool showTitle = true;
+bool showSender = true;
 unsigned long lastClockUpdate = 0;
 
 // Title scroll

@@ -137,6 +137,16 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
                         hideClockOverlay();
                     }
                 }
+                if (doc.containsKey("show_title") || doc.containsKey("show_sender")) {
+                    bool wasTitle = showTitle, wasSender = showSender;
+                    if (doc.containsKey("show_title")) showTitle = doc["show_title"];
+                    if (doc.containsKey("show_sender")) showSender = doc["show_sender"];
+                    preferences.putBool("showTitle", showTitle);
+                    preferences.putBool("showSender", showSender);
+                    LOGF("[MQTT] Show title: %d, show sender: %d", showTitle, showSender);
+                    // Que se vea ya en la foto actual, sin esperar a la siguiente
+                    if (wasTitle != showTitle || wasSender != showSender) refreshPhotoInfo();
+                }
                 if (doc.containsKey("has_owner")) {
                     bool hasOwner = doc["has_owner"];
                     LOGF("[MQTT] has_owner: %s", hasOwner ? "true" : "false");

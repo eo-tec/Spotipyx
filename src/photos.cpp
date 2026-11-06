@@ -284,7 +284,7 @@ void displayPhotoFromCenter()
         unsigned long start = millis();
         for (;;) {
             uint32_t t = millis() - start;
-            reveal::render(style, *from, to, photoAuthor, t, *frame);
+            reveal::render(style, *from, to, showSender ? photoAuthor : "", t, *frame);
             for (int y = 0; y < PANEL_RES_Y; y++)
                 for (int x = 0; x < PANEL_RES_X; x++)
                     dma_display->drawPixelRGB888(x, y, frame->px[y][x][2], frame->px[y][x][0], frame->px[y][x][1]);
@@ -453,8 +453,27 @@ void onReceiveNewPic(int id)
     songShowing = "";
 }
 
+// Vuelve a pintar título y remitente de la foto en pantalla tras cambiar
+// showTitle/showSender: devuelve la foto a la franja de abajo y los repinta.
+void refreshPhotoInfo()
+{
+    if (songShowing != "") return; // Spotify en pantalla: no hay foto que tocar
+    for (int y = PANEL_RES_Y - 18; y < PANEL_RES_Y; y++) { // cubre el layout de dos líneas
+        for (int x = 0; x < PANEL_RES_X; x++) {
+            dma_display->drawPixel(x, y, screenBuffer[y][x]);
+        }
+    }
+    titleNeedsScroll = false;
+    showPhotoInfo(String(photoTitle), String(photoAuthor));
+    buildOverlayMask();
+}
+
 void showPhotoInfo(String title, String name)
 {
+    // El dueño del frame puede ocultar uno u otro desde la app
+    if (!showTitle) title = "";
+    if (!showSender) name = "";
+
     dma_display->setFont(&Picopixel);
     dma_display->setTextSize(1);
     dma_display->setTextColor(myWHITE);

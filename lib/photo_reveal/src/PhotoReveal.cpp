@@ -634,8 +634,9 @@ void drawPostcardBack(Canvas &out, int x, int y, const char *sender, float write
     for (int i = 30; i < 47; i++) put(out, x + i, y + 29 + k * 3, POST_LINE);
 
   // El mensaje a mano: primero "from <nombre>" y luego tres renglones de garabatos.
-  char line[48];
-  fitName("from ", sender, POST_W - 6, line, sizeof(line));
+  // Sin remitente (el dueño lo ha ocultado) solo quedan los garabatos.
+  char line[48] = "";
+  if (sender && sender[0]) fitName("from ", sender, POST_W - 6, line, sizeof(line));
   int chars = (int)(clamp01(write / 0.35f) * (strlen(line) + 1));
   drawText(out, line, x + 3, y + 10, INK, chars);
   for (int k = 0; k < 3; k++) {

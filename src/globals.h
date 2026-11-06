@@ -127,6 +127,9 @@ extern bool screenOff;
 
 // Clock overlay
 extern bool clockEnabled;
+// Título de la foto y nombre de quien la envía: el dueño puede ocultarlos desde la app
+extern bool showTitle;
+extern bool showSender;
 extern unsigned long lastClockUpdate;
 
 // Title scroll
