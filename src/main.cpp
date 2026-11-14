@@ -25,6 +25,22 @@
 #define OTA_MAX_BOOT_ATTEMPTS 3       // reinicios sin validar antes de revertir
 #define OTA_VALIDATE_AFTER_MS 60000UL // uptime estable (ms) para dar la version por buena
 
+// Rampa gradual de brillo para evitar brownout por pico de corriente.
+// Hasta que se hace, el panel se queda al minimo y los cambios de brillo
+// que llegan por MQTT solo se guardan (ver startupBrightnessRampDone).
+// Solo core 1.
+void rampPanelBrightness()
+{
+    int targetBrightness = panelBrightness(brightness);
+    LOG("[Startup] Rampa de brillo...");
+    for (int b = 1; b <= targetBrightness; b++) {
+        dma_display->setBrightness8(b);
+        delay(5);
+    }
+    startupBrightnessRampDone = true;
+    LOGF("[Startup] Brillo objetivo alcanzado: %d", targetBrightness);
+}
+
 void setup()
 {
 #ifdef HW_V2
@@ -400,17 +416,7 @@ void setup()
     LOG("DEV_MODE active - skipping startup update check");
     #endif
 
-    // Rampa gradual de brillo para evitar brownout por pico de corriente
-    {
-        int targetBrightness = panelBrightness(brightness);
-        LOG("[Startup] Rampa de brillo...");
-        for (int b = 1; b <= targetBrightness; b++) {
-            dma_display->setBrightness8(b);
-            delay(5);
-        }
-        startupBrightnessRampDone = true;
-        LOGF("[Startup] Brillo objetivo alcanzado: %d", targetBrightness);
-    }
+    rampPanelBrightness();
 
     // Inicializar Watchdog Timer
     esp_task_wdt_init(WDT_TIMEOUT, true);

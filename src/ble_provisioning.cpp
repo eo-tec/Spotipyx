@@ -405,6 +405,11 @@ void processPendingOwnerUI() {
             pWifiCredentialsChar = nullptr;
             pResponseChar = nullptr;
         }
+        // Si el frame arranco sin dueño, setup() salio antes de la rampa de
+        // brillo y el panel sigue al minimo: hacerla ahora que ya lo tiene
+        if (!startupBrightnessRampDone) {
+            rampPanelBrightness();
+        }
     }
 }
 

@@ -99,6 +99,7 @@ inline uint8_t panelBrightness(int percent) {
     return map(constrain(percent, 0, 100), 0, 100, PANEL_BRIGHTNESS_MIN, 255);
 }
 extern bool startupBrightnessRampDone;
+void rampPanelBrightness(); // definida en main.cpp; solo core 1
 extern int wifiBrightness;
 extern int maxIndex;
 extern int maxPhotos;
